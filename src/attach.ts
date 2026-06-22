@@ -37,17 +37,23 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
     let dataUrl = retagDataUrl(await fileToDataUrl(file), mime);
     let outMime = mime;
     // Native formats (jpeg/png/gif/webp) pass through untouched — preserves quality
-    // and animation. Anything else (bmp, svg, avif, tiff, heic, jfif…) gets rasterized
-    // to PNG so Claude can actually read it instead of rejecting the whole request.
+    // and animation. Anything else gets converted so Claude can read it instead of
+    // rejecting the whole request.
     if (!CLAUDE_NATIVE_IMAGE.has(mime)) {
-      const png = await transcodeToPng(dataUrl).catch(() => null);
-      if (!png) {
+      const isHeic = mime === 'image/heic' || mime === 'image/heif' || /\.(heic|heif)$/i.test(file.name);
+      // HEIC/HEIF (iPhone's default) has no browser-native canvas decoder, so route it
+      // through a lazy-loaded wasm decoder → JPEG. Everything else (bmp, svg, avif,
+      // tiff…) rasterizes to PNG via canvas.
+      const conv = isHeic
+        ? await heicToJpeg(file).catch(() => null)
+        : await transcodeToPng(dataUrl).catch(() => null);
+      if (!conv) {
         throw new Error(
-          `${mime || 'that image format'} can't be read by your browser to convert it. Save it as PNG or JPEG and try again.`
+          `${mime || 'that image format'} couldn't be converted in your browser. Save it as PNG or JPEG and try again.`
         );
       }
-      dataUrl = png;
-      outMime = 'image/png';
+      dataUrl = conv;
+      outMime = isHeic ? 'image/jpeg' : 'image/png';
     }
     return { ...base, mime: outMime, kind: 'image', dataUrl };
   }
@@ -102,6 +108,28 @@ async function transcodeToPng(dataUrl: string): Promise<string> {
   if (!ctx) throw new Error('no 2d canvas context');
   ctx.drawImage(img, 0, 0, w, h);
   return canvas.toDataURL('image/png');
+}
+
+// HEIC/HEIF photos have no browser-native canvas decoder, so we lazy-load a wasm
+// decoder only when one is actually attached — keeps ~1.5MB out of the main bundle.
+let heic2anyModule: any = null;
+async function heicToJpeg(file: File): Promise<string> {
+  if (!heic2anyModule) {
+    // @ts-ignore — heic2any ships no type declarations
+    heic2anyModule = (await import('heic2any')).default;
+  }
+  const out = await heic2anyModule({ blob: file, toType: 'image/jpeg', quality: 0.9 });
+  const blob: Blob = Array.isArray(out) ? out[0] : out; // multi-image HEIC → first frame
+  return await blobToDataUrl(blob);
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(new Error('read failed'));
+    r.readAsDataURL(blob);
+  });
 }
 
 // Force a base64 data URL's media-type header to `mime`, keeping the payload as-is.
