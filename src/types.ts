@@ -76,6 +76,9 @@ export interface Settings {
 
   // ── Appearance ──
   theme: 'auto' | 'light' | 'dark';
+  // work = surface the proactive "save as document/table" offer bar; casual = hide it
+  // (the manual per-reply "Save ▾" menu stays available in both modes).
+  chat_mode: 'work' | 'casual';
 
   // ── Thinking ──
   thinking_effort: 'off' | 'low' | 'medium' | 'high' | 'max';

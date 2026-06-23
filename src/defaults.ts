@@ -75,6 +75,7 @@ export const DEFAULT_SETTINGS: Settings = {
 
   // Appearance
   theme: 'dark',
+  chat_mode: 'casual',   // keep the vibe by default — no auto download prompts
 
   // Thinking
   thinking_effort: 'off',

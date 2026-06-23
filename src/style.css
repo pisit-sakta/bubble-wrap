@@ -756,6 +756,21 @@ details.adv .sub h4 {
 .code-wrap.previewing pre { display: none; }
 .code-wrap.previewing .artifact-frame { display: block; }
 
+/* Code stays on one line and scrolls (claude.ai doesn't wrap code either), but hide the
+   chunky scrollbar so phones get a clean look — swipe/trackpad still scrolls it. The
+   highlight.js theme puts overflow-x:auto on .hljs, so target that + the <pre>. */
+.bubble pre,
+.code-wrap pre,
+.hljs {
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* legacy Edge */
+}
+.bubble pre::-webkit-scrollbar,
+.code-wrap pre::-webkit-scrollbar,
+.hljs::-webkit-scrollbar {
+  display: none;                /* WebKit / Blink (Safari, Chrome) */
+}
+
 /* ─── Export buttons in the model popover ─── */
 .export-row { display: flex; gap: 8px; }
 .popover-btn.ghost {

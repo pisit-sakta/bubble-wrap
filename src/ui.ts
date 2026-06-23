@@ -628,6 +628,7 @@ function msgSig(m: Message): string {
     m.webSources?.length || 0,
     m.webSearchQueries?.length || 0,
     m.offerDismissed ? 1 : 0,
+    store.settings.chat_mode,   // doc-offer bar visibility depends on the mode → bust cache on toggle
   ].join('|');
 }
 
@@ -753,7 +754,9 @@ function messageInnerHtml(m: Message, isStreaming: boolean): string {
     : '';
   const sourcesHtml = hasSearch ? `<div class="sources">${queryPills}${sourceCards}</div>` : '';
 
-  const offerHtml = (!isStreaming && m.role === 'assistant' && !m.offerDismissed) ? docOfferHtml(m) : '';
+  // The proactive "save as document" bar only shows in Work mode — in Casual it'd
+  // ambush every table/ASCII-art reply with a vibe-killing "WANNA DOWNLOAD??".
+  const offerHtml = (store.settings.chat_mode === 'work' && !isStreaming && m.role === 'assistant' && !m.offerDismissed) ? docOfferHtml(m) : '';
 
   return `
     ${imageHtml ? `<div class="images">${imageHtml}</div>` : ''}
@@ -1315,6 +1318,17 @@ function renderSettingsSheet() {
   const s = store.settings;
   body.innerHTML = `
     <div class="sect">
+      <h3>Mode</h3>
+      <div class="group">
+        ${rowField('Chat mode', 'Casual keeps it chill — no auto "save as document" prompts. Work surfaces them when a reply looks like a doc or table. (The manual "Save ▾" button stays in both.)', `<div class="seg-control" id="mode-control">${
+          (['casual', 'work'] as const).map(t =>
+            `<button class="seg ${s.chat_mode === t ? 'on' : ''}" data-mode-pick="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`
+          ).join('')
+        }</div>`)}
+      </div>
+    </div>
+
+    <div class="sect">
       <h3>Appearance</h3>
       <div class="group">
         ${rowField('Theme', 'Auto follows your system setting', `<div class="seg-control" id="theme-control">${
@@ -1490,6 +1504,16 @@ function renderSettingsSheet() {
       await store.updateSettings({ theme: pick });
       applyTheme(pick);
       body.querySelectorAll<HTMLButtonElement>('[data-theme-pick]').forEach(b => b.classList.toggle('on', b === btn));
+      buzz();
+    });
+  });
+
+  // Chat mode segmented control (Work shows the proactive doc-offer bar; Casual hides it)
+  body.querySelectorAll<HTMLButtonElement>('[data-mode-pick]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const pick = btn.dataset.modePick as Settings['chat_mode'];
+      await store.updateSettings({ chat_mode: pick });  // emit() re-renders the chat → offer bars update
+      body.querySelectorAll<HTMLButtonElement>('[data-mode-pick]').forEach(b => b.classList.toggle('on', b === btn));
       buzz();
     });
   });
