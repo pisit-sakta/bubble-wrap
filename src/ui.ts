@@ -1303,9 +1303,12 @@ function toggleControl(key: string, on: boolean) {
 function selectControl(key: string, value: string, options: string[]) {
   return `<select data-bind="${key}">${options.map(o => `<option value="${escHtml(o)}" ${o === value ? 'selected' : ''}>${escHtml(o)}</option>`).join('')}</select>`;
 }
-function textInput(key: string, value: string, type = 'text') {
-  return `<input type="${type}" data-bind="${key}" value="${escHtml(String(value ?? ''))}" />`;
+function textInput(key: string, value: string, type = 'text', extraAttrs = '') {
+  return `<input type="${type}" data-bind="${key}" value="${escHtml(String(value ?? ''))}" ${extraAttrs} />`;
 }
+// Mobile keyboards autocapitalize/autocorrect by default — fatal for URLs, emails
+// and passwords. Stamp these off so the typed value is exactly what the user sees.
+const NO_MANGLE = 'autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"';
 function numberInput(key: string, value: number) {
   return `<input type="number" data-bind="${key}" value="${value}" />`;
 }
@@ -1458,9 +1461,9 @@ function renderSettingsSheet() {
       <h3>Sync across devices</h3>
       <div class="group">
         ${rowField('Enable sync', 'Mirror chats & settings to your PocketBase (proxy password stays on this device)', toggleControl('sync_enabled', s.sync_enabled))}
-        ${field('PocketBase URL', 'e.g. https://bubble-pb.up.railway.app', textInput('sync_url', s.sync_url, 'url'))}
-        ${field('Account email', null, textInput('sync_email', s.sync_email))}
-        ${field('Account password', 'Your PocketBase user login (device-local)', textInput('sync_password', s.sync_password, 'password'))}
+        ${field('PocketBase URL', 'e.g. https://bubble-pb.up.railway.app', textInput('sync_url', s.sync_url, 'url', NO_MANGLE))}
+        ${field('Account email', null, textInput('sync_email', s.sync_email, 'email', NO_MANGLE))}
+        ${field('Account password', 'Your PocketBase user login (device-local)', textInput('sync_password', s.sync_password, 'password', NO_MANGLE))}
         ${rowField('Status', null, '<button class="btn-secondary" id="set-sync-now">Connect &amp; sync now</button>')}
         <div class="field"><div class="desc" id="sync-status">—</div></div>
       </div>

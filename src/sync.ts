@@ -48,9 +48,11 @@ async function api(path: string, opts: RequestInit = {}): Promise<any> {
 async function authenticate(): Promise<void> {
   const s = store.settings;
   if (!s.sync_url || !s.sync_email || !s.sync_password) throw new Error('Fill the PocketBase URL, email & password first');
+  // Mobile keyboards love sneaking in trailing spaces / autocapitalization;
+  // trim the identity so invisible whitespace can't cause a phantom 400.
   const res = await api('/api/collections/users/auth-with-password', {
     method: 'POST',
-    body: JSON.stringify({ identity: s.sync_email, password: s.sync_password }),
+    body: JSON.stringify({ identity: s.sync_email.trim(), password: s.sync_password.trim() }),
   });
   token = res?.token || '';
   userId = res?.record?.id || '';
