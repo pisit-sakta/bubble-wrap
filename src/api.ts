@@ -1,8 +1,17 @@
-import type { Settings, Message, WebSource } from './types';
+import type { Settings, Message, WebSource, Attachment } from './types';
 
 // The only media types Anthropic's vision API accepts. Attachments are normalized to
 // one of these at attach time (see attach.ts); this set guards both ends.
 export const CLAUDE_NATIVE_IMAGE = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+// Anthropic accepts native PDF documents up to ~32MB / 100 pages per request. We leave
+// headroom and fall back to extracted text for anything bigger (or missing a dataUrl).
+const PDF_NATIVE_MAX_BYTES = 30 * 1024 * 1024;
+function pdfAsDocument(a: Attachment): boolean {
+  if (a.kind !== 'pdf' || !a.dataUrl) return false;
+  const b64 = a.dataUrl.slice(a.dataUrl.indexOf(',') + 1);
+  return b64.length * 0.75 <= PDF_NATIVE_MAX_BYTES;
+}
 
 // OpenAI Chat Completions request body
 interface ContentTextPart  { type: 'text';      text: string; }
@@ -98,11 +107,20 @@ function buildAnthropicMessages(history: Message[], systemPrompt: string): { sys
         }
       }
     }
+    // Native PDF documents — Claude reads these with vision (layout, scans, figures),
+    // not just scraped text. Anything missing a dataUrl (old message) or too large
+    // for one request falls through to the text block below.
+    const pdfDocs = (m.attachments || []).filter(pdfAsDocument);
+    for (const a of pdfDocs) {
+      const mt = a.dataUrl!.match(/^data:([^;]+);base64,(.*)$/);
+      if (mt) parts.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: mt[2] } });
+    }
+    const sentAsDoc = new Set(pdfDocs.map(a => a.id));
     let textBody = m.content || '';
     if (skippedImages.length) {
       textBody = `[unsupported image format, not sent: ${skippedImages.join(', ')}]` + (textBody ? '\n\n' + textBody : '');
     }
-    const fileAttachments = (m.attachments || []).filter(a => a.kind !== 'image');
+    const fileAttachments = (m.attachments || []).filter(a => a.kind !== 'image' && !sentAsDoc.has(a.id));
     if (fileAttachments.length) {
       const filesBlock = fileAttachments
         .map(a => `<attached_file name="${a.name}" type="${a.mime}">\n${a.text || ''}\n</attached_file>`)
@@ -125,7 +143,10 @@ export async function streamChat(
 ): Promise<void> {
   // Web search AND extended thinking only work via the native Anthropic endpoint.
   const thinkingOn = !!settings.thinking_effort && settings.thinking_effort !== 'off';
-  const useNative = !!(settings.chat_completion_source === 'claude' && (settings.enable_web_search || thinkingOn));
+  // A native PDF document block only forwards through /v1/messages, so a PDF attachment
+  // forces the native path (the OpenAI /chat/completions shim can't carry documents).
+  const hasPdfDoc = messages.some(m => (m.attachments || []).some(pdfAsDocument));
+  const useNative = !!(settings.chat_completion_source === 'claude' && (settings.enable_web_search || thinkingOn || hasPdfDoc));
   const base = settings.reverse_proxy.replace(/\/$/, '');
   const url = base + (useNative ? '/messages' : '/chat/completions');
   const model =

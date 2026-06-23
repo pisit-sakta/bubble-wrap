@@ -96,7 +96,8 @@ export interface Attachment {
   name: string;
   mime: string;
   size: number;
-  // For images: data URL (base64). For text: extracted plain text. For PDF: extracted text + filename.
+  // For images: data URL (base64). For text: extracted plain text.
+  // For PDF: dataUrl = raw PDF base64 (sent as a native document block); text = extracted-text fallback.
   dataUrl?: string;
   text?: string;
 }

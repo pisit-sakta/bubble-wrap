@@ -58,8 +58,14 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
     return { ...base, mime: outMime, kind: 'image', dataUrl };
   }
   if (isPdf) {
+    // Keep the raw PDF (base64) so Claude can read it natively via a document block —
+    // layout, scanned pages, figures. Text extraction stays as a fallback for the
+    // OpenAI-compat path, non-Claude sources, and PDFs too big to send natively.
+    const dataUrl = await fileToDataUrl(file)
+      .then(u => retagDataUrl(u, 'application/pdf'))
+      .catch(() => undefined);
     const text = await extractPdfText(file);
-    return { ...base, kind: 'pdf', text };
+    return { ...base, kind: 'pdf', dataUrl, text };
   }
   // text-ish: read as text
   const text = await fileToText(file);
