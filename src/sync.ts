@@ -101,10 +101,20 @@ async function syncNow(): Promise<void> {
   }
 
   // Pushes: local conversation is newer than remote (or remote is missing it).
+  // Each upsert is isolated so one bad chat (e.g. too large for the backend's JSON
+  // field limit) gets skipped-with-a-warning instead of aborting the whole sync.
+  const failed: string[] = [];
   for (const c of localConvs) {
     if (deleteSet.has(c.id)) continue;
     const r = remote.get(c.id);
-    if (!r || (c.updatedAt || 0) > r.syncTs) await upsert(r, c.id, c, c.updatedAt || Date.now());
+    if (!r || (c.updatedAt || 0) > r.syncTs) {
+      try {
+        await upsert(r, c.id, c, c.updatedAt || Date.now());
+      } catch (e) {
+        failed.push(c.title || c.id);
+        console.warn(`[sync] skipped "${c.title || c.id}":`, (e as Error).message);
+      }
+    }
   }
 
   // Settings (whole-blob LWW, secrets stripped).
@@ -127,7 +137,12 @@ async function syncNow(): Promise<void> {
   const known = [...new Set([...remoteConvKeys, ...localConvs.filter(c => !deleteSet.has(c.id)).map(c => c.id)])];
   await setKv('syncedConvIds', known);
 
-  setStatus({ state: 'synced', at: Date.now() });
+  if (failed.length) {
+    const names = failed.slice(0, 3).join(', ') + (failed.length > 3 ? `, +${failed.length - 3} more` : '');
+    setStatus({ state: 'error', detail: `Synced, but ${failed.length} chat(s) too large to upload: ${names}`, at: Date.now() });
+  } else {
+    setStatus({ state: 'synced', at: Date.now() });
+  }
 }
 
 // Debounced, re-entrancy-safe runner. Local mutations call scheduleSync().
