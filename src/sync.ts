@@ -24,7 +24,13 @@ export function onStatus(cb: ((s: SyncStatus) => void) | null) { statusCb = cb; 
 export function getStatus(): SyncStatus { return status; }
 function setStatus(s: SyncStatus) { status = s; statusCb?.(s); }
 
-function base(): string { return (store.settings.sync_url || '').replace(/\/$/, ''); }
+function base(): string {
+  let u = (store.settings.sync_url || '').trim().replace(/\/$/, '');
+  // A schemeless URL makes fetch() treat it as a path on the current origin
+  // (GitHub Pages → POST → 405). Default to https:// so the host is honored.
+  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
+  return u;
+}
 
 async function api(path: string, opts: RequestInit = {}): Promise<any> {
   const r = await fetch(base() + path, {
