@@ -59,20 +59,39 @@ async function authenticate(): Promise<void> {
   if (!token) throw new Error('Login failed');
 }
 
-type RemoteRec = { id: string; syncTs: number; data: any };
-async function remoteList(): Promise<Map<string, RemoteRec>> {
-  const map = new Map<string, RemoteRec>();
+// Delta sync: we fetch lightweight METADATA (key + syncTs) for every record first,
+// then download the heavy `data` blob ONLY for records that actually changed. This
+// turns an idle poll from "re-download the entire chat history" into one tiny request.
+type RemoteMeta = { id: string; syncTs: number };
+async function remoteMeta(): Promise<Map<string, RemoteMeta>> {
+  const map = new Map<string, RemoteMeta>();
   let page = 1;
   while (true) {
-    const res = await api(`/api/collections/store/records?perPage=200&page=${page}`);
-    for (const it of res.items || []) map.set(it.key, { id: it.id, syncTs: it.syncTs || 0, data: it.data });
+    // `fields=` projects away the fat `data` column — a few hundred bytes per record
+    // regardless of how many base64 photos/PDFs the conversation holds.
+    const res = await api(`/api/collections/store/records?perPage=200&page=${page}&fields=id,key,syncTs`);
+    for (const it of res.items || []) map.set(it.key, { id: it.id, syncTs: it.syncTs || 0 });
     if (!res.totalPages || page >= res.totalPages) break;
     page++;
   }
   return map;
 }
 
-async function upsert(existing: RemoteRec | undefined, key: string, data: any, syncTs: number): Promise<void> {
+// Fetch the full `data` blobs for just the given PocketBase record ids (the changed
+// ones). Batched by id-filter so we never page through untouched conversations.
+async function remoteData(ids: string[]): Promise<Map<string, any>> {
+  const out = new Map<string, any>();
+  const CHUNK = 40;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    const filter = encodeURIComponent(slice.map(id => `id='${id}'`).join(' || '));
+    const res = await api(`/api/collections/store/records?perPage=${slice.length}&filter=${filter}&fields=id,data`);
+    for (const it of res.items || []) out.set(it.id, it.data);
+  }
+  return out;
+}
+
+async function upsert(existing: { id: string } | undefined, key: string, data: any, syncTs: number): Promise<void> {
   const body = JSON.stringify({ key, data, syncTs, owner: userId });
   if (existing) await api(`/api/collections/store/records/${existing.id}`, { method: 'PATCH', body });
   else await api('/api/collections/store/records', { method: 'POST', body });
@@ -82,22 +101,43 @@ async function syncNow(): Promise<void> {
   if (!store.settings.sync_enabled) return;
   if (!token) { setStatus({ state: 'connecting' }); await authenticate(); }
 
-  const remote = await remoteList();
+  const meta = await remoteMeta();
   const localConvs = await listConversations();
   const localById = new Map(localConvs.map(c => [c.id, c]));
   const prevSynced: string[] = (await getKv<string[]>('syncedConvIds')) || [];
-  const remoteConvKeys = [...remote.keys()].filter(k => k !== 'settings');
+  const remoteConvKeys = [...meta.keys()].filter(k => k !== 'settings');
 
-  // Deletions that happened on another device: previously synced, still local, gone remotely.
-  const toDeleteLocal = prevSynced.filter(id => localById.has(id) && !remote.has(id));
+  // Deletions that happened on another device: previously synced, still local, gone
+  // remotely. Metadata covers EVERY record, so delete-detection stays fully correct.
+  const toDeleteLocal = prevSynced.filter(id => localById.has(id) && !meta.has(id));
   const deleteSet = new Set(toDeleteLocal);
 
-  // Pulls: remote conversation is newer than local (or local is missing it).
-  const toApply: Conversation[] = [];
+  // Decide which conversations are newer remotely (so we must pull their blob) — by
+  // comparing timestamps only. No `data` has been downloaded yet at this point.
+  const pullKeys: string[] = [];
   for (const key of remoteConvKeys) {
-    const r = remote.get(key)!;
+    const m = meta.get(key)!;
     const local = localById.get(key);
-    if (!local || r.syncTs > (local.updatedAt || 0)) toApply.push(r.data as Conversation);
+    if (!local || m.syncTs > (local.updatedAt || 0)) pullKeys.push(key);
+  }
+
+  // Settings (whole-blob LWW): pull if remote is newer, push if local is strictly
+  // newer (or missing remotely), else leave it — so an unchanged poll moves no bytes.
+  const rsMeta = meta.get('settings');
+  const localSettingsAt = (await getKv<number>('settingsUpdatedAt')) || 0;
+  const pullSettings = !!(rsMeta && rsMeta.syncTs > localSettingsAt);
+  const pushSettings = !rsMeta || localSettingsAt > rsMeta.syncTs;
+
+  // Download the heavy blobs for ONLY the changed records (idle poll → empty → no
+  // blob traffic at all).
+  const needData = pullKeys.map(k => meta.get(k)!.id);
+  if (pullSettings) needData.push(rsMeta!.id);
+  const blobs = needData.length ? await remoteData(needData) : new Map<string, any>();
+
+  const toApply: Conversation[] = [];
+  for (const key of pullKeys) {
+    const data = blobs.get(meta.get(key)!.id);
+    if (data) toApply.push(data as Conversation);
   }
 
   // Pushes: local conversation is newer than remote (or remote is missing it).
@@ -106,10 +146,10 @@ async function syncNow(): Promise<void> {
   const failed: string[] = [];
   for (const c of localConvs) {
     if (deleteSet.has(c.id)) continue;
-    const r = remote.get(c.id);
-    if (!r || (c.updatedAt || 0) > r.syncTs) {
+    const m = meta.get(c.id);
+    if (!m || (c.updatedAt || 0) > m.syncTs) {
       try {
-        await upsert(r, c.id, c, c.updatedAt || Date.now());
+        await upsert(m, c.id, c, c.updatedAt || Date.now());
       } catch (e) {
         failed.push(c.title || c.id);
         console.warn(`[sync] skipped "${c.title || c.id}":`, (e as Error).message);
@@ -117,17 +157,19 @@ async function syncNow(): Promise<void> {
     }
   }
 
-  // Settings (whole-blob LWW, secrets stripped).
-  const rs = remote.get('settings');
-  const localSettingsAt = (await getKv<number>('settingsUpdatedAt')) || 0;
-  if (rs && rs.syncTs > localSettingsAt) {
-    const merged: any = { ...store.settings, ...rs.data };
-    for (const k of LOCAL_KEYS) merged[k] = store.settings[k]; // never overwrite local secrets
-    await store.updateSettings(merged, { syncedAt: rs.syncTs });
-  } else {
+  if (pullSettings) {
+    const data = blobs.get(rsMeta!.id);
+    if (data) {
+      const merged: any = { ...store.settings, ...data };
+      for (const k of LOCAL_KEYS) merged[k] = store.settings[k]; // never overwrite local secrets
+      await store.updateSettings(merged, { syncedAt: rsMeta!.syncTs });
+    }
+  } else if (pushSettings) {
     const out: any = { ...store.settings };
     for (const k of LOCAL_KEYS) delete out[k];
-    await upsert(rs, 'settings', out, localSettingsAt || Date.now());
+    const pushTs = localSettingsAt || Date.now();
+    await upsert(rsMeta, 'settings', out, pushTs);
+    await setKv('settingsUpdatedAt', pushTs); // avoid re-pulling our own settings next poll
   }
 
   // Apply pulled conversations + remote deletions to the local db.
