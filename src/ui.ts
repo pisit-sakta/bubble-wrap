@@ -4,7 +4,7 @@ import { fileToAttachment, formatBytes } from './attach';
 import { renderMarkdown, renderMarkdownStreaming } from './markdown';
 import { CLAUDE_MODELS } from './defaults';
 import { applyTheme, type ThemePref } from './theme';
-import { onStatus, getStatus, syncNowManual, startSync, type SyncStatus } from './sync';
+import { onStatus, getStatus, syncNowManual, startSync, scheduleSync, type SyncStatus } from './sync';
 import type { Attachment, Conversation, Message, Settings } from './types';
 
 // ─── Helpers ───
@@ -594,6 +594,16 @@ function scrollToBottomSoon(forceStick = false) {
   });
 }
 
+// Scroll a specific message to the top of the chat viewport (with a little breathing
+// room), so a new/regenerating turn sits up top and the reply streams in below it.
+function scrollMsgToTop(id: string) {
+  requestAnimationFrame(() => {
+    const root = ensureChatRoot();
+    const el = msgNodes.get(id);
+    if (root && el) root.scrollTop = Math.max(0, el.offsetTop - 12);
+  });
+}
+
 function createMessageEl(m: Message): HTMLElement {
   const el = document.createElement('div');
   el.className = `msg ${m.role}`;
@@ -1044,7 +1054,9 @@ async function streamAndAppend(reuseAssistantId?: string) {
 
   store.streaming = true;
   streamingMsgId = asstId;
-  stickToBottom = true; // jump to the new reply even if scrolled up
+  // Anchor the new turn at the TOP of the viewport (claude.ai-style) and DON'T follow
+  // the streaming text down — that drag-the-screen feeling was the bottom-pinning below.
+  stickToBottom = false;
   updateSendBtn();
   abortCtrl = new AbortController();
 
@@ -1054,6 +1066,13 @@ async function streamAndAppend(reuseAssistantId?: string) {
 
   // Mount the message node before streaming kicks in
   renderChat();
+
+  // Scroll the just-sent user turn (or the regen target) to the top so the reply has
+  // room to stream in below, instead of yanking the view to the bottom.
+  const anchorId = idx > 0 && store.current.messages[idx - 1]?.role === 'user'
+    ? store.current.messages[idx - 1].id
+    : asstId;
+  scrollMsgToTop(anchorId);
 
   let accText = '';
   let accThinking = '';
@@ -1126,6 +1145,9 @@ async function streamAndAppend(reuseAssistantId?: string) {
         }
         updateSendBtn();
         await store.saveCurrent();
+        // Push the finished reply NOW (not on the 1500ms debounce) so it lands before
+        // the user backgrounds the app — otherwise the turn syncs reply-less.
+        scheduleSync(0);
         buzz(4);
         scrollToBottomSoon();
       },

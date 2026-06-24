@@ -16,6 +16,7 @@ let syncing = false;
 let dirty = false;
 let debounceTimer: number | null = null;
 let pollTimer: number | null = null;
+let hideHooked = false;
 
 export type SyncStatus = { state: 'off' | 'connecting' | 'synced' | 'error'; detail?: string; at?: number };
 let status: SyncStatus = { state: 'off' };
@@ -190,6 +191,10 @@ async function syncNow(): Promise<void> {
 // Debounced, re-entrancy-safe runner. Local mutations call scheduleSync().
 function runSync(): void {
   if (!store.settings.sync_enabled) return;
+  // Never push a mid-stream conversation: the assistant message is still empty/partial
+  // in the db until onDone commits it. Pushing now would sync a reply-less turn and the
+  // real reply might never make it up (see the immediate flush on completion in ui.ts).
+  if (store.streaming) { dirty = true; return; }
   if (syncing) { dirty = true; return; }
   syncing = true; dirty = false;
   syncNow()
@@ -221,6 +226,15 @@ export async function startSync(): Promise<void> {
   }
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = window.setInterval(() => { if (store.settings.sync_enabled && !syncing) scheduleSync(0); }, 20000);
+
+  // Best-effort flush when the tab is backgrounded/closed, so a just-finished reply
+  // isn't stranded by the debounce when a mobile user immediately locks their phone.
+  if (!hideHooked) {
+    hideHooked = true;
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' && store.settings.sync_enabled && !store.streaming && !syncing) runSync();
+    });
+  }
 }
 
 // "Sync now" button + connecting after entering creds.
