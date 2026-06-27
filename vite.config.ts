@@ -3,6 +3,9 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
   base: './',
+  // Stamp the build so a device can show exactly which version it's running — the
+  // fastest way to confirm a deploy actually got past the service-worker cache.
+  define: { __BUILD_ID__: JSON.stringify(new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC') },
   server: { host: true, port: 5173 },
   plugins: [
     VitePWA({

@@ -1091,7 +1091,9 @@ async function streamAndAppend(reuseAssistantId?: string) {
       store.current!.messages[i].thinking = accThinking || undefined;
       if (el) updateStreamingBody(el, store.current!.messages[i]);
     }
-    scrollToBottomSoon();
+    // Deliberately NO auto-scroll here: following the streaming text dragged the
+    // viewport down. The new turn is anchored at the top once (scrollMsgToTop on send);
+    // the reply just fills in below and the user stays put.
   };
   const requestFlush = () => {
     dirty = true;
@@ -1144,6 +1146,10 @@ async function streamAndAppend(reuseAssistantId?: string) {
           await store.finalizeRegenVariant(asstId);
         }
         updateSendBtn();
+        // Bump updatedAt so the completed reply ALWAYS out-timestamps any earlier push
+        // of this conversation — saveCurrent() doesn't touch it, so without this a reply
+        // can share the user-message timestamp and fail the sync's newer-than check.
+        store.current!.updatedAt = Date.now();
         await store.saveCurrent();
         // Push the finished reply NOW (not on the 1500ms debounce) so it lands before
         // the user backgrounds the app — otherwise the turn syncs reply-less.
@@ -1165,6 +1171,7 @@ async function streamAndAppend(reuseAssistantId?: string) {
         }
         updateSendBtn();
         renderChat();
+        store.current!.updatedAt = Date.now();
         await store.saveCurrent();
         toast('Error: ' + err.message, 'error');
       },
@@ -1502,7 +1509,8 @@ function renderSettingsSheet() {
     </div>
 
     <div class="sect" style="text-align:center;color:var(--text-faint);font-size:11px;padding:12px 0 0;">
-      Bubble · settings stored locally in your browser
+      Bubble · settings stored locally in your browser<br>
+      <span style="opacity:.7">build ${escHtml(__BUILD_ID__)}</span>
     </div>
   `;
 
