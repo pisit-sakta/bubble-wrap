@@ -6,12 +6,29 @@ import { mount } from './ui';
 import { applyTheme } from './theme';
 import { startSync } from './sync';
 
-// Register the service worker and AUTO-APPLY updates. Without this, the SW caches the
-// app but never updates it — every deploy is invisible until the cache is manually
-// cleared. immediate:true checks on load; onNeedRefresh reloads to the new build.
-const updateSW = registerSW({
+// Register the service worker and AUTO-APPLY updates.
+//
+// registerType is 'autoUpdate', so vite-plugin-pwa installs its own listener that does
+// location.reload() as soon as a new worker activates. The piece that was missing is
+// that a new worker is only ever DISCOVERED on a real document load — and an installed
+// Android PWA resumed from the task switcher never performs one. A phone that is never
+// cold-started therefore runs a stale build forever. So we re-check explicitly on
+// resume, on regaining network, and hourly. Never while a reply is streaming, because
+// activation triggers a reload that would kill the in-flight response.
+registerSW({
   immediate: true,
-  onNeedRefresh() { updateSW(true); },
+  onRegisteredSW(_swUrl, r) {
+    if (!r) return;
+    const check = () => {
+      if (!navigator.onLine || store.streaming) return;
+      r.update().catch(() => { /* offline or transient — try again next time */ });
+    };
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') check();
+    });
+    window.addEventListener('online', check);
+    setInterval(check, 60 * 60 * 1000);
+  },
 });
 
 const root = document.getElementById('app')!;
