@@ -1,8 +1,5 @@
 import type { Settings, Message, WebSource, Attachment } from './types';
-
-// The only media types Anthropic's vision API accepts. Attachments are normalized to
-// one of these at attach time (see attach.ts); this set guards both ends.
-export const CLAUDE_NATIVE_IMAGE = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+import { CLAUDE_NATIVE_IMAGE, splitDataUrl, sniffBase64 } from './image';
 
 // Anthropic accepts native PDF documents up to ~32MB / 100 pages per request. We leave
 // headroom and fall back to extracted text for anything bigger (or missing a dataUrl).
@@ -28,6 +25,8 @@ export interface StreamCallbacks {
   onText: (delta: string) => void;
   onThinking?: (delta: string) => void;
   onSearch?: (query?: string) => void;
+  // Something the user should know about that isn't an error (e.g. images left out).
+  onNotice?: (message: string) => void;
   onDone: (full: { text: string; thinking?: string; sources?: WebSource[]; searched?: boolean; queries?: string[] }) => void;
   onError: (error: Error) => void;
 }
@@ -54,9 +53,64 @@ function collectSources(into: WebSource[], seen: Set<string>, raw: any) {
   }
 }
 
+// ── Images in a request ──
+// The API caps a request at 100 images on 200k-context models (600 on the rest).
+const MAX_IMAGES = 100;
+// Total base64 image payload one request may carry. Unknowable up front — 128 MB on the
+// first-party API, 20 MB on Bedrock, anything at all on a self-hosted proxy — so it
+// starts unlimited and is learned: a 413 halves it for the rest of the session.
+let imageBudget = Infinity;
+let budgetProxy = '';
+
+interface ImagePlan {
+  send: Map<Attachment, { mediaType: string; data: string }>;
+  note: Map<Attachment, string>;   // what to tell Claude about an image that isn't going
+  bytes: number;
+  omitted: number;                 // left out for room (as opposed to unusable)
+}
+
+// Decide, once per request and for both wire formats, exactly which images go and with
+// what media type. The type is sniffed from the bytes right here, so a stale or missing
+// label on a stored attachment can never reach the API; anything that isn't a format
+// Claude accepts becomes a text note instead of a rejected request. Newest messages get
+// first claim on the room, so when a chat outgrows a request it is the oldest images
+// that drop out.
+function planImages(history: Message[], budget: number): ImagePlan {
+  const plan: ImagePlan = { send: new Map(), note: new Map(), bytes: 0, omitted: 0 };
+  let full = false;
+  for (let i = history.length - 1; i >= 0; i--) {
+    for (const a of history[i].attachments || []) {
+      if (a.kind !== 'image') continue;
+      const label = `"${a.name || 'image'}"`;
+      const parts = a.unreadable ? null : splitDataUrl(a.dataUrl);
+      const type = parts && sniffBase64(parts.b64);
+      if (!parts || !type || !CLAUDE_NATIVE_IMAGE.has(type)) {
+        plan.note.set(a, `[attached image ${label} could not be sent: ${type || parts?.mime || 'the file'} is not a readable JPEG, PNG, GIF or WebP]`);
+      } else if (full || plan.send.size >= MAX_IMAGES || plan.bytes + parts.b64.length > budget) {
+        full = true;
+        plan.omitted++;
+        plan.note.set(a, `[earlier image ${label} left out: this conversation holds more images than fit in one request]`);
+      } else {
+        plan.send.set(a, { mediaType: type, data: parts.b64 });
+        plan.bytes += parts.b64.length;
+      }
+    }
+  }
+  return plan;
+}
+
+// A message's text as sent: notes for images that aren't going, then inlined files, then the text.
+function textBodyOf(m: Message, plan: ImagePlan, files: Attachment[]): string {
+  const notes = (m.attachments || []).map(a => plan.note.get(a)).filter(Boolean).join('\n');
+  const filesBlock = files
+    .map(a => `<attached_file name="${a.name}" type="${a.mime}">\n${a.text || ''}\n</attached_file>`)
+    .join('\n\n');
+  return [notes, filesBlock, m.content || ''].filter(Boolean).join('\n\n');
+}
+
 // Build the messages array from our internal Message[] + attachments.
 // Images become OpenAI vision parts. Text/PDF attachments are inlined as text blocks.
-function buildRequestMessages(history: Message[], systemPrompt: string): RequestMessage[] {
+function buildRequestMessages(history: Message[], systemPrompt: string, plan: ImagePlan): RequestMessage[] {
   const out: RequestMessage[] = [];
   if (systemPrompt && systemPrompt.trim()) {
     out.push({ role: 'system', content: systemPrompt });
@@ -64,19 +118,12 @@ function buildRequestMessages(history: Message[], systemPrompt: string): Request
   for (const m of history) {
     if (m.role === 'system') continue; // system handled above
     const parts: ContentPart[] = [];
-    let textBody = m.content || '';
-    const fileAttachments = (m.attachments || []).filter(a => a.kind !== 'image');
-    if (fileAttachments.length) {
-      const filesBlock = fileAttachments
-        .map(a => `<attached_file name="${a.name}" type="${a.mime}">\n${a.text || ''}\n</attached_file>`)
-        .join('\n\n');
-      textBody = filesBlock + (textBody ? '\n\n' + textBody : '');
-    }
+    const textBody = textBodyOf(m, plan, (m.attachments || []).filter(a => a.kind !== 'image'));
     if (textBody) parts.push({ type: 'text', text: textBody });
     for (const a of m.attachments || []) {
-      if (a.kind === 'image' && a.dataUrl) {
-        parts.push({ type: 'image_url', image_url: { url: a.dataUrl } });
-      }
+      const img = plan.send.get(a);
+      // Rebuilt from the sniffed type: the proxy derives media_type from this header.
+      if (img) parts.push({ type: 'image_url', image_url: { url: `data:${img.mediaType};base64,${img.data}` } });
     }
     out.push({
       role: m.role,
@@ -88,24 +135,14 @@ function buildRequestMessages(history: Message[], systemPrompt: string): Request
 
 // Native Anthropic Messages format. Required for the web_search server tool —
 // the OpenAI /chat/completions shim silently drops it, but /v1/messages forwards it.
-function buildAnthropicMessages(history: Message[], systemPrompt: string): { system?: string; messages: any[] } {
+function buildAnthropicMessages(history: Message[], systemPrompt: string, plan: ImagePlan): { system?: string; messages: any[] } {
   const messages: any[] = [];
   for (const m of history) {
     if (m.role === 'system') continue;
     const parts: any[] = [];
-    const skippedImages: string[] = [];
     for (const a of m.attachments || []) {
-      if (a.kind === 'image' && a.dataUrl) {
-        const mt = a.dataUrl.match(/^data:([^;]+);base64,(.*)$/);
-        // Newly-attached images are already normalized to a supported type, but a
-        // message saved before that fix could still carry e.g. image/heic — drop it
-        // (with a note) instead of letting the whole request 400.
-        if (mt && CLAUDE_NATIVE_IMAGE.has(mt[1])) {
-          parts.push({ type: 'image', source: { type: 'base64', media_type: mt[1], data: mt[2] } });
-        } else if (mt) {
-          skippedImages.push(`${a.name || 'image'} (${mt[1]})`);
-        }
-      }
+      const img = plan.send.get(a);
+      if (img) parts.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
     }
     // Native PDF documents — Claude reads these with vision (layout, scans, figures),
     // not just scraped text. Anything missing a dataUrl (old message) or too large
@@ -116,17 +153,7 @@ function buildAnthropicMessages(history: Message[], systemPrompt: string): { sys
       if (mt) parts.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: mt[2] } });
     }
     const sentAsDoc = new Set(pdfDocs.map(a => a.id));
-    let textBody = m.content || '';
-    if (skippedImages.length) {
-      textBody = `[unsupported image format, not sent: ${skippedImages.join(', ')}]` + (textBody ? '\n\n' + textBody : '');
-    }
-    const fileAttachments = (m.attachments || []).filter(a => a.kind !== 'image' && !sentAsDoc.has(a.id));
-    if (fileAttachments.length) {
-      const filesBlock = fileAttachments
-        .map(a => `<attached_file name="${a.name}" type="${a.mime}">\n${a.text || ''}\n</attached_file>`)
-        .join('\n\n');
-      textBody = filesBlock + (textBody ? '\n\n' + textBody : '');
-    }
+    const textBody = textBodyOf(m, plan, (m.attachments || []).filter(a => a.kind !== 'image' && !sentAsDoc.has(a.id)));
     if (textBody) parts.push({ type: 'text', text: textBody });
     if (!parts.length) parts.push({ type: 'text', text: '…' });
     messages.push({ role: m.role, content: parts });
@@ -154,9 +181,12 @@ export async function streamChat(
       ? settings.custom_model
       : settings.claude_model;
 
+  // The learned image budget belongs to one proxy; start over if it changed.
+  if (budgetProxy !== base) { budgetProxy = base; imageBudget = Infinity; }
+  let plan = planImages(messages, imageBudget);
   let body: any;
   if (useNative) {
-    const { system, messages: amsgs } = buildAnthropicMessages(messages, systemPrompt);
+    const { system, messages: amsgs } = buildAnthropicMessages(messages, systemPrompt, plan);
     body = {
       model,
       max_tokens: settings.openai_max_tokens || 8192,
@@ -174,7 +204,7 @@ export async function streamChat(
   } else {
     body = {
       model,
-      messages: buildRequestMessages(messages, systemPrompt),
+      messages: buildRequestMessages(messages, systemPrompt, plan),
       stream: !!settings.stream_openai,
     };
     if (settings.temp_openai !== undefined) body.temperature = settings.temp_openai;
@@ -199,7 +229,7 @@ export async function streamChat(
   let stuJson = '';
 
   try {
-    const resp = await fetch(url, {
+    const post = () => fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -210,6 +240,22 @@ export async function streamChat(
       body: JSON.stringify(body),
       signal: abortSignal,
     });
+    let resp = await post();
+    // 413 = the request outgrew the proxy's or platform's body limit, and images are the
+    // only bulk in it. Shed the oldest ones and go again rather than leave the chat
+    // unable to send; a 413 is refused before any work is done, so retrying is free.
+    for (let i = 0; resp.status === 413 && plan.bytes > 0 && i < 6; i++) {
+      resp.body?.cancel().catch(() => {});
+      imageBudget = Math.floor(plan.bytes / 2);
+      plan = planImages(messages, imageBudget);
+      body.messages = useNative
+        ? buildAnthropicMessages(messages, systemPrompt, plan).messages
+        : buildRequestMessages(messages, systemPrompt, plan);
+      resp = await post();
+    }
+    if (plan.omitted) {
+      callbacks.onNotice?.(`${plan.omitted} older image${plan.omitted === 1 ? '' : 's'} left out — this chat has more than fit in one request`);
+    }
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
@@ -305,6 +351,16 @@ export async function streamChat(
           // Anthropic server-tool blocks (web search)
           if (evt?.type === 'content_block_start' && evt?.content_block) {
             const cb = evt.content_block;
+            // A block may open with content already in it (some proxies put the first
+            // words here rather than in a delta). Nothing later repeats it, so skipping
+            // it silently drops the start of the reply.
+            if (cb.type === 'text' && typeof cb.text === 'string' && cb.text) {
+              fullText += cb.text;
+              callbacks.onText(cb.text);
+            } else if (cb.type === 'thinking' && typeof cb.thinking === 'string' && cb.thinking) {
+              fullThinking += cb.thinking;
+              callbacks.onThinking?.(cb.thinking);
+            }
             if (cb.type === 'server_tool_use' && /search/i.test(cb.name || '')) {
               searched = true;
               stuIndex = evt.index;

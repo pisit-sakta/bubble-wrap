@@ -296,6 +296,12 @@ a { color: var(--accent); text-decoration: none; }
   padding: 2px 4px;
   text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.composer .attachments .att.busy .spin {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--border-strong); border-top-color: var(--text);
+  animation: att-spin 0.8s linear infinite;
+}
+@keyframes att-spin { to { transform: rotate(360deg); } }
 .composer .attachments .att .x {
   position: absolute; top: 4px; right: 4px;
   width: 20px; height: 20px;

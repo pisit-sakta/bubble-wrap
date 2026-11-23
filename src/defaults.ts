@@ -88,6 +88,7 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 export const CLAUDE_MODELS = [
+  'claude-fable-5-2',
   'claude-fable-5-1',
   'claude-fable-5',
   'claude-opus-5-5',
