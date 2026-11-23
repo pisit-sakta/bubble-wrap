@@ -1330,6 +1330,10 @@ function toggleControl(key: string, on: boolean) {
   return `<div class="toggle ${on ? 'on' : ''}" data-toggle="${key}"></div>`;
 }
 function selectControl(key: string, value: string, options: string[]) {
+  // A value this build doesn't list (a model synced from a newer build or from
+  // SillyTavern) must still show as selected — otherwise the menu displays its first
+  // entry while a different model is actually in use.
+  if (value && !options.includes(value)) options = [value, ...options];
   return `<select data-bind="${key}">${options.map(o => `<option value="${escHtml(o)}" ${o === value ? 'selected' : ''}>${escHtml(o)}</option>`).join('')}</select>`;
 }
 function textInput(key: string, value: string, type = 'text', extraAttrs = '') {
