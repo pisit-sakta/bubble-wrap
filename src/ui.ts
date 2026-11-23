@@ -1,5 +1,5 @@
 import { store, newId } from './state';
-import { streamChat, fetchSettingsFromST } from './api';
+import { streamChat, fetchSettingsFromST, type StreamCallbacks } from './api';
 import { fileToAttachment, repairLegacyImages, formatBytes } from './attach';
 import { renderMarkdown, renderMarkdownStreaming } from './markdown';
 import { CLAUDE_MODELS } from './defaults';
@@ -16,6 +16,16 @@ let pendingAttachments: Attachment[] = [];
 // Sending is held while this is non-zero so a message can't leave without its image.
 let attachBusy = 0;
 let abortCtrl: AbortController | null = null;
+// Resolves once the reply in flight has completely finished — including the saving that
+// onDone/onError do after the network part ends, which streamChat itself doesn't wait for.
+let streamSettled: Promise<void> = Promise.resolve();
+function settling(cb: StreamCallbacks, settle: () => void): StreamCallbacks {
+  return {
+    ...cb,
+    onDone: async (full) => { try { await cb.onDone(full); } finally { settle(); } },
+    onError: async (err) => { try { await cb.onError(err); } finally { settle(); } },
+  };
+}
 
 let toastTimer: number | null = null;
 function toast(msg: string, kind: 'info' | 'error' = 'info') {
@@ -915,6 +925,14 @@ async function handleMessageAction(action: string, mid: string) {
   if (!c) return;
   const msg = c.messages.find(m => m.id === mid);
   if (!msg) return;
+  // These rewrite the conversation, and a reply that is still streaming keeps writing
+  // into it. Regenerate was the worst case: it started a second stream in the same
+  // bubble, and the two took turns overwriting each other's text. Stop the one in
+  // flight and let it finish saving before touching anything.
+  if (store.streaming && /^(regen|edit|delete|prev-variant|next-variant)$/.test(action)) {
+    abortCtrl?.abort();
+    await streamSettled;
+  }
   if (action === 'copy') {
     try { await navigator.clipboard.writeText(msg.content || ''); toast('Copied'); } catch { toast('Copy failed', 'error'); }
   } else if (action === 'delete') {
@@ -1138,11 +1156,13 @@ async function streamAndAppend(reuseAssistantId?: string) {
     if (raf == null) raf = requestAnimationFrame(flush);
   };
 
+  let settle!: () => void;
+  streamSettled = new Promise<void>(resolve => { settle = resolve; });
   await streamChat(
     s,
     historyForApi,
     systemPrompt,
-    {
+    settling({
       onText: (delta) => { accText += delta; requestFlush(); },
       onThinking: (delta) => { accThinking += delta; requestFlush(); },
       onNotice: (message) => toast(message),
@@ -1219,7 +1239,7 @@ async function streamAndAppend(reuseAssistantId?: string) {
         await store.saveCurrent();
         toast('Error: ' + err.message, 'error');
       },
-    },
+    }, settle),
     abortCtrl.signal,
   );
 }
