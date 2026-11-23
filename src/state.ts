@@ -98,6 +98,11 @@ class Store {
 
   async deleteCurrentConversation(id: string) {
     await deleteConversation(id);
+    // Remember the deletion for sync. A chat that is gone here but still on the backend
+    // looks exactly like one this device has never seen, and would be downloaded again.
+    if (this.settings.sync_enabled) {
+      await setKv('pendingDeletes', [...((await getKv<string[]>('pendingDeletes')) || []), id]);
+    }
     this.conversations = this.conversations.filter(c => c.id !== id);
     if (this.current?.id === id) {
       this.current = this.conversations[0] || null;
@@ -105,6 +110,16 @@ class Store {
       else await setKv('lastConversationId', '');
     }
     this.syncHook?.();
+    this.emit();
+  }
+
+  // Wipe every conversation on this device. The caller removes the synced copies first
+  // (sync.ts), otherwise the next sync would simply download them all again.
+  async deleteAllConversations() {
+    for (const c of await listConversations()) await deleteConversation(c.id);
+    this.conversations = [];
+    this.current = null;
+    await setKv('lastConversationId', '');
     this.emit();
   }
 

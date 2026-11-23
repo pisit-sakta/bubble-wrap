@@ -103,6 +103,22 @@ async function syncNow(): Promise<void> {
   if (!token) { setStatus({ state: 'connecting' }); await authenticate(); }
 
   const meta = await remoteMeta();
+
+  // Chats deleted on this device: remove them from the backend before anything below
+  // can mistake them for new remote chats and pull them back. Kept in storage until it
+  // succeeds, so a deletion made offline still goes through later.
+  const pending: string[] = (await getKv<string[]>('pendingDeletes')) || [];
+  for (const id of pending) {
+    const rec = meta.get(id);
+    if (rec) await api(`/api/collections/store/records/${rec.id}`, { method: 'DELETE' });
+    meta.delete(id);
+  }
+  if (pending.length) {
+    // Re-read: another chat may have been deleted while those requests were in flight.
+    const now: string[] = (await getKv<string[]>('pendingDeletes')) || [];
+    await setKv('pendingDeletes', now.filter(id => !pending.includes(id)));
+  }
+
   const localConvs = await listConversations();
   const localById = new Map(localConvs.map(c => [c.id, c]));
   const prevSynced: string[] = (await getKv<string[]>('syncedConvIds')) || [];
@@ -186,6 +202,18 @@ async function syncNow(): Promise<void> {
   } else {
     setStatus({ state: 'synced', at: Date.now() });
   }
+}
+
+// Remove every synced conversation from the backend (settings stay). Other devices see
+// them gone on their next sync and drop their copies too. No-op when sync is off.
+export async function deleteAllRemote(): Promise<void> {
+  if (!store.settings.sync_enabled) return;
+  if (!token) await authenticate();
+  for (const [key, rec] of await remoteMeta()) {
+    if (key !== 'settings') await api(`/api/collections/store/records/${rec.id}`, { method: 'DELETE' });
+  }
+  await setKv('syncedConvIds', []);
+  await setKv('pendingDeletes', []);
 }
 
 // Debounced, re-entrancy-safe runner. Local mutations call scheduleSync().
