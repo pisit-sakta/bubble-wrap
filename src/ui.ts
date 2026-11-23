@@ -155,9 +155,7 @@ export function mount(root: HTMLElement) {
 
   // Track whether the user is pinned to the bottom; only auto-scroll if so.
   const chatRoot = $<HTMLDivElement>('#chat')!;
-  chatRoot.addEventListener('scroll', () => {
-    stickToBottom = chatRoot.scrollHeight - chatRoot.scrollTop - chatRoot.clientHeight < 90;
-  }, { passive: true });
+  chatRoot.addEventListener('scroll', () => { stickToBottom = atBottom(chatRoot); }, { passive: true });
 
   const ta = $<HTMLTextAreaElement>('#composer-input')!;
   ta.addEventListener('input', () => { autoGrow(ta); updateSendBtn(); });
@@ -465,6 +463,7 @@ function renderConvList() {
       const id = it.dataset.id!;
       await store.selectConversation(id);
       toggleDrawer(false);
+      scrollToBottomSoon(true);   // a chat opens at its latest message, wherever the last one was left
     });
   });
 }
@@ -585,6 +584,9 @@ function renderCompactionCard(root: HTMLElement, c: { compactionSummary?: string
 
 let scrollPending = false;
 let stickToBottom = true;
+function atBottom(root: HTMLElement): boolean {
+  return root.scrollHeight - root.scrollTop - root.clientHeight < 90;
+}
 function scrollToBottomSoon(forceStick = false) {
   if (forceStick) stickToBottom = true;
   if (!stickToBottom) return;
@@ -603,7 +605,11 @@ function scrollMsgToTop(id: string) {
   requestAnimationFrame(() => {
     const root = ensureChatRoot();
     const el = msgNodes.get(id);
-    if (root && el) root.scrollTop = Math.max(0, el.offsetTop - 12);
+    if (!root || !el) return;
+    // Measured against the scroller itself: el.offsetTop is relative to .app-shell, so
+    // it also counts the top bar and the notch inset and would overshoot by that much.
+    const top = el.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop;
+    root.scrollTop = Math.max(0, top - 12);
   });
 }
 
@@ -1121,6 +1127,11 @@ async function streamAndAppend(reuseAssistantId?: string) {
     // Deliberately NO auto-scroll here: following the streaming text dragged the
     // viewport down. The new turn is anchored at the top once (scrollMsgToTop on send);
     // the reply just fills in below and the user stays put.
+    // That also means the view is no longer pinned to the bottom, whatever the scroll
+    // listener concluded earlier: text growing below the fold fires no scroll event, so
+    // a "pinned" left over from the moment of sending would otherwise survive and yank
+    // the reader to the bottom on the next re-render.
+    stickToBottom = false;
   };
   const requestFlush = () => {
     dirty = true;
@@ -1152,6 +1163,11 @@ async function streamAndAppend(reuseAssistantId?: string) {
         // Kill any pending streaming flush so it can't clobber the final render.
         if (raf != null) { cancelAnimationFrame(raf); raf = null; }
         dirty = false;
+        // Decide now, from where the view really is, whether the scrolls below may move
+        // it: only a reader already at the end of the text gets kept at the end. Someone
+        // still on the opening lines of a long reply must not be thrown to its last line.
+        const chatRoot = ensureChatRoot();
+        if (chatRoot) stickToBottom = atBottom(chatRoot);
         // Final commit: swap streaming body for fully-rendered markdown.
         const el = msgNodes.get(asstId);
         const i = store.current!.messages.findIndex(x => x.id === asstId);

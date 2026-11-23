@@ -351,6 +351,16 @@ export async function streamChat(
           // Anthropic server-tool blocks (web search)
           if (evt?.type === 'content_block_start' && evt?.content_block) {
             const cb = evt.content_block;
+            // A block may open with content already in it (some proxies put the first
+            // words here rather than in a delta). Nothing later repeats it, so skipping
+            // it silently drops the start of the reply.
+            if (cb.type === 'text' && typeof cb.text === 'string' && cb.text) {
+              fullText += cb.text;
+              callbacks.onText(cb.text);
+            } else if (cb.type === 'thinking' && typeof cb.thinking === 'string' && cb.thinking) {
+              fullThinking += cb.thinking;
+              callbacks.onThinking?.(cb.thinking);
+            }
             if (cb.type === 'server_tool_use' && /search/i.test(cb.name || '')) {
               searched = true;
               stuIndex = evt.index;
