@@ -21,13 +21,23 @@ interface RequestMessage {
 }
 
 
+// Why a reply ended, when it didn't simply finish. A reply that is declined, cut off at
+// the length limit or paused arrives as an ordinary successful response — with no error
+// — so unless this is read and shown, half a sentence looks like the whole answer.
+export interface StopInfo {
+  reason: 'refusal' | 'length' | 'paused';
+  category?: string;      // refusals: which safety check declined (cyber, bio, reasoning_extraction, …)
+  explanation?: string;   // refusals: the API's own one-line reason, when it gives one
+  requestId?: string;     // what support asks for when a decline looks wrong
+}
+
 export interface StreamCallbacks {
   onText: (delta: string) => void;
   onThinking?: (delta: string) => void;
   onSearch?: (query?: string) => void;
   // Something the user should know about that isn't an error (e.g. images left out).
   onNotice?: (message: string) => void;
-  onDone: (full: { text: string; thinking?: string; sources?: WebSource[]; searched?: boolean; queries?: string[] }) => void;
+  onDone: (full: { text: string; thinking?: string; sources?: WebSource[]; searched?: boolean; queries?: string[]; stop?: StopInfo }) => void;
   onError: (error: Error) => void;
 }
 
@@ -227,6 +237,18 @@ export async function streamChat(
   // query JSON (Claude writes its OWN search query — not the user's prompt).
   let stuIndex = -1;
   let stuJson = '';
+  let stop: StopInfo | undefined;
+  // Both wire formats, and whatever a proxy maps one onto the other: Anthropic says
+  // refusal / max_tokens / pause_turn, OpenAI says content_filter / length.
+  const noteStop = (reason: unknown, details?: any) => {
+    if (reason === 'refusal' || reason === 'content_filter') {
+      stop = { reason: 'refusal', category: details?.category || undefined, explanation: details?.explanation || undefined };
+    } else if (reason === 'max_tokens' || reason === 'length') {
+      stop = { reason: 'length' };
+    } else if (reason === 'pause_turn') {
+      stop = { reason: 'paused' };
+    }
+  };
 
   try {
     const post = () => fetch(url, {
@@ -262,6 +284,9 @@ export async function streamChat(
       throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 400)}`);
     }
 
+    // Only readable when the proxy exposes it to the page; harmless when it doesn't.
+    const requestId = resp.headers.get('request-id') || undefined;
+
     if (!body.stream) {
       const json: any = await resp.json();
       let text: any = json?.choices?.[0]?.message?.content ?? '';
@@ -282,9 +307,11 @@ export async function streamChat(
         }
       }
       collectSources(sources, seenUrls, json?.choices?.[0]?.message);
+      noteStop(json?.stop_reason ?? json?.choices?.[0]?.finish_reason, json?.stop_details);
+      if (stop) stop.requestId = requestId;
       if (fullText) callbacks.onText(fullText);
       if (fullThinking && callbacks.onThinking) callbacks.onThinking(fullThinking);
-      callbacks.onDone({ text: fullText, thinking: fullThinking || undefined, sources: sources.length ? sources : undefined, searched, queries: queries.length ? queries : undefined });
+      callbacks.onDone({ text: fullText, thinking: fullThinking || undefined, sources: sources.length ? sources : undefined, searched, queries: queries.length ? queries : undefined, stop });
       return;
     }
 
@@ -292,6 +319,7 @@ export async function streamChat(
     if (!reader) throw new Error('No response body for streaming');
     const decoder = new TextDecoder();
     let buffer = '';
+    let streamError: Error | null = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -306,6 +334,15 @@ export async function streamChat(
         if (data === '[DONE]') continue;
         try {
           const evt: any = JSON.parse(data);
+          // How the reply ended. Anthropic puts it on message_delta, OpenAI on the choice.
+          if (evt?.type === 'message_delta') noteStop(evt.delta?.stop_reason, evt.delta?.stop_details ?? evt.stop_details);
+          if (evt?.choices?.[0]?.finish_reason) noteStop(evt.choices[0].finish_reason, evt.choices[0].stop_details ?? evt.stop_details);
+          // A failure after the response started (the server was overloaded mid-reply, …)
+          // can't change the HTTP status any more, so it arrives as an event instead.
+          if (evt?.type === 'error' || (evt?.error && !evt.choices)) {
+            const err = evt.error || {};
+            streamError = new Error(`The reply was cut off by a server error: ${err.message || err.type || 'unknown error'}${err.message && err.type ? ` (${err.type})` : ''}`);
+          }
           // OpenAI Chat Completions delta
           const delta = evt?.choices?.[0]?.delta;
           if (delta) {
@@ -385,9 +422,11 @@ export async function streamChat(
           /* skip bad chunk */
         }
       }
+      if (streamError) throw streamError;   // outside the per-event try, which swallows everything
     }
 
-    callbacks.onDone({ text: fullText, thinking: fullThinking || undefined, sources: sources.length ? sources : undefined, searched, queries: queries.length ? queries : undefined });
+    if (stop) stop.requestId = requestId;
+    callbacks.onDone({ text: fullText, thinking: fullThinking || undefined, sources: sources.length ? sources : undefined, searched, queries: queries.length ? queries : undefined, stop });
   } catch (e) {
     if ((e as Error).name === 'AbortError') {
       callbacks.onDone({ text: fullText, thinking: fullThinking || undefined, sources: sources.length ? sources : undefined, searched, queries: queries.length ? queries : undefined });
