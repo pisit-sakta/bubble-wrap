@@ -100,6 +100,13 @@ export interface Attachment {
   // For PDF: dataUrl = raw PDF base64 (sent as a native document block); text = extracted-text fallback.
   dataUrl?: string;
   text?: string;
+  // Images only. Pixel size as stored — its presence also means the image has been
+  // through normalizeImage (image.ts), i.e. it is a format, size and label the API takes.
+  width?: number;
+  height?: number;
+  // Images only. An image from an older build that no decoder here could open: kept in
+  // the chat for the record, never put in a request.
+  unreadable?: boolean;
 }
 
 export interface WebSource {

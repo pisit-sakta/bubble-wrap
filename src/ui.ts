@@ -1,6 +1,6 @@
 import { store, newId } from './state';
 import { streamChat, fetchSettingsFromST } from './api';
-import { fileToAttachment, formatBytes } from './attach';
+import { fileToAttachment, repairLegacyImages, formatBytes } from './attach';
 import { renderMarkdown, renderMarkdownStreaming } from './markdown';
 import { CLAUDE_MODELS } from './defaults';
 import { applyTheme, type ThemePref } from './theme';
@@ -12,6 +12,9 @@ const $ = <T extends Element>(s: string, root: ParentNode = document) => root.qu
 const escHtml = (s: string) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 
 let pendingAttachments: Attachment[] = [];
+// Picked files still being read/converted (a HEIC or a 48 MP photo takes a moment).
+// Sending is held while this is non-zero so a message can't leave without its image.
+let attachBusy = 0;
 let abortCtrl: AbortController | null = null;
 
 let toastTimer: number | null = null;
@@ -215,7 +218,7 @@ function updateSendBtn() {
   btn.textContent = '↑';
   btn.setAttribute('aria-label', 'Send');
   btn.classList.remove('streaming');
-  btn.classList.toggle('active', hasContent);
+  btn.classList.toggle('active', hasContent && !attachBusy);
 }
 
 function renderModelLabel() {
@@ -1005,6 +1008,7 @@ async function onSendOrCancel() {
     return;
   }
   const ta = $<HTMLTextAreaElement>('#composer-input')!;
+  if (attachBusy) { toast('Still preparing your attachment — one sec…'); return; }
   const text = ta.value.trim();
   if (!text && pendingAttachments.length === 0) return;
 
@@ -1023,13 +1027,28 @@ async function onSendOrCancel() {
     attachments: pendingAttachments.length ? pendingAttachments : undefined,
     createdAt: Date.now(),
   };
+  const draft = { text: ta.value, attachments: pendingAttachments };
   ta.value = '';
   autoGrow(ta);
   pendingAttachments = [];
   renderAttachments();
 
-  if (!store.current) await store.newConversation();
-  await store.appendMessage(userMsg);
+  try {
+    if (!store.current) await store.newConversation();
+    await store.appendMessage(userMsg);
+  } catch (e) {
+    // The browser refused to store the message (out of space, usually). Put the draft
+    // back in the composer instead of letting text + attachments vanish without a trace.
+    if (store.current) store.current.messages = store.current.messages.filter(m => m.id !== userMsg.id);
+    ta.value = draft.text;
+    autoGrow(ta);
+    pendingAttachments = draft.attachments;
+    renderAttachments();
+    renderChat();
+    updateSendBtn();
+    toast(`Couldn't save that message, so it wasn't sent: ${(e as Error).message || e}`, 'error');
+    return;
+  }
   buzz();
   await streamAndAppend();
 }
@@ -1074,6 +1093,14 @@ async function streamAndAppend(reuseAssistantId?: string) {
     : asstId;
   scrollMsgToTop(anchorId);
 
+  // Chats from older builds can hold images that would get the whole request rejected
+  // (wrong type label, HEIC, a 12 MB original). Fix them in place, once, before sending;
+  // the save that follows every reply persists the result.
+  const repaired = await repairLegacyImages(historyForApi);
+  if (repaired.unreadable) {
+    toast(`${repaired.unreadable} older image${repaired.unreadable === 1 ? '' : 's'} in this chat couldn't be read and won't be sent`);
+  }
+
   let accText = '';
   let accThinking = '';
 
@@ -1107,6 +1134,7 @@ async function streamAndAppend(reuseAssistantId?: string) {
     {
       onText: (delta) => { accText += delta; requestFlush(); },
       onThinking: (delta) => { accThinking += delta; requestFlush(); },
+      onNotice: (message) => toast(message),
       onSearch: (query) => {
         const el = msgNodes.get(asstId);
         const bubble = el?.querySelector('.bubble');
@@ -1186,16 +1214,23 @@ async function onFilesPicked(e: Event) {
   const files = Array.from(input.files || []);
   input.value = '';
   if (!files.length) return;
-  for (const f of files) {
-    try {
-      const att = await fileToAttachment(f);
-      pendingAttachments.push(att);
-    } catch (e) {
-      toast(`Couldn't attach ${f.name}: ${(e as Error).message}`, 'error');
-    }
-  }
+  // Show a placeholder per file straight away and hold the send button: conversion is
+  // async, and a message sent mid-way would go out without the image it was meant for.
+  attachBusy += files.length;
   renderAttachments();
   updateSendBtn();
+  const failed: string[] = [];
+  for (const f of files) {   // one at a time — decoding several big photos at once can exhaust a phone
+    try {
+      pendingAttachments.push(await fileToAttachment(f));
+    } catch (e) {
+      failed.push(`${f.name || 'file'}: ${(e as Error).message || 'could not be read.'}`);
+    }
+    attachBusy--;
+    renderAttachments();
+    updateSendBtn();
+  }
+  if (failed.length) toast(`Couldn't attach ${failed.join('\nCouldn\'t attach ')}`, 'error');
 }
 
 function renderAttachments() {
@@ -1206,7 +1241,7 @@ function renderAttachments() {
     }
     const icon = a.kind === 'pdf' ? '📕' : '📄';
     return `<div class="att" data-id="${a.id}">${icon}<span class="lbl">${escHtml(a.name)}</span><span class="x" data-x="${a.id}">✕</span></div>`;
-  }).join('');
+  }).join('') + '<div class="att busy" aria-label="Preparing attachment"><span class="spin"></span></div>'.repeat(attachBusy);
   root.querySelectorAll<HTMLSpanElement>('[data-x]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
