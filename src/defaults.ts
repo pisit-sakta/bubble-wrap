@@ -36,6 +36,7 @@ export const DEFAULT_SETTINGS: Settings = {
   stream_openai: true,
   reasoning_effort: 'auto',
   show_thoughts: true,
+  show_decline_notices: true,
   squash_system_messages: false,
   use_sysprompt: false,
   names_behavior: 0,

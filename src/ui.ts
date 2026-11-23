@@ -4,7 +4,7 @@ import { fileToAttachment, repairLegacyImages, formatBytes } from './attach';
 import { renderMarkdown, renderMarkdownStreaming } from './markdown';
 import { CLAUDE_MODELS } from './defaults';
 import { applyTheme, type ThemePref } from './theme';
-import { onStatus, getStatus, syncNowManual, startSync, scheduleSync, type SyncStatus } from './sync';
+import { onStatus, getStatus, syncNowManual, startSync, scheduleSync, deleteAllRemote, type SyncStatus } from './sync';
 import type { Attachment, Conversation, Message, Settings } from './types';
 
 // ─── Helpers ───
@@ -1214,7 +1214,11 @@ async function streamAndAppend(reuseAssistantId?: string) {
           store.current!.messages[i].thinking = accThinking || undefined;
           store.current!.messages[i].webSources = sources && sources.length ? sources : undefined;
           store.current!.messages[i].webSearchQueries = queries && queries.length ? queries : undefined;
-          if (stop) store.current!.messages[i].error = describeStop(stop, !!accText);
+          // Declines can be muted in Settings once their cause is known; a cut-off or
+          // paused reply is always explained.
+          if (stop && (stop.reason !== 'refusal' || store.settings.show_decline_notices)) {
+            store.current!.messages[i].error = describeStop(stop, !!accText);
+          }
         }
         store.streaming = false;
         streamingMsgId = null;
@@ -1380,6 +1384,24 @@ function exportAllJSON() {
   toast(`Exported ${store.conversations.length} chats ✓`);
 }
 
+async function deleteAllChats() {
+  const n = store.conversations.length;
+  if (!n) { toast('No chats to delete', 'info'); return; }
+  if (store.streaming) { toast('Wait for the current reply to finish first', 'error'); return; }
+  if (!confirm(`Delete all ${n} chat${n === 1 ? '' : 's'}? This cannot be undone.`)) return;
+  try {
+    // Synced copies go first: if that fails, nothing local is touched, rather than
+    // deleting here and having the next sync bring everything back.
+    await deleteAllRemote();
+    await store.deleteAllConversations();
+    toggleSheet(false);
+    toast(`Deleted ${n} chat${n === 1 ? '' : 's'}`);
+    buzz(20);
+  } catch (e) {
+    toast(`Couldn't delete: ${(e as Error).message || e}`, 'error');
+  }
+}
+
 async function importJSONFile(file: File) {
   try {
     const data: any = JSON.parse(await file.text());
@@ -1451,6 +1473,7 @@ function renderSettingsSheet() {
             `<button class="seg ${s.chat_mode === t ? 'on' : ''}" data-mode-pick="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`
           ).join('')
         }</div>`)}
+        ${rowField('Explain declined replies', 'When the API declines a reply, say so (and why) under it. Off = the reply just stops.', toggleControl('show_decline_notices', s.show_decline_notices))}
       </div>
     </div>
 
@@ -1598,6 +1621,7 @@ function renderSettingsSheet() {
         ${rowField('Export all chats', 'Download a JSON backup of every conversation', '<button class="btn-secondary" id="set-export-all">Export all</button>')}
         ${rowField('Import chats', 'Restore from a Bubble JSON backup or a single exported chat', '<button class="btn-secondary" id="set-import">Import…</button>')}
         ${rowField('Current chat → Markdown', 'Human-readable transcript of the open conversation', '<button class="btn-secondary" id="set-export-md">Markdown</button>')}
+        ${rowField('Delete all chats', 'Removes every conversation from this device, and from sync if it is on. Cannot be undone.', '<button class="btn-secondary" id="set-delete-all" style="color:var(--danger)">Delete all</button>')}
       </div>
       <input type="file" id="import-file-input" accept="application/json,.json" hidden />
     </div>
@@ -1676,6 +1700,7 @@ function renderSettingsSheet() {
 
   // Data: export / import
   $<HTMLButtonElement>('#set-export-all')?.addEventListener('click', exportAllJSON);
+  $<HTMLButtonElement>('#set-delete-all')?.addEventListener('click', deleteAllChats);
   $<HTMLButtonElement>('#set-export-md')?.addEventListener('click', exportCurrentMarkdown);
   const importInput = $<HTMLInputElement>('#import-file-input');
   $<HTMLButtonElement>('#set-import')?.addEventListener('click', () => importInput?.click());

@@ -108,6 +108,16 @@ class Store {
     this.emit();
   }
 
+  // Wipe every conversation on this device. The caller removes the synced copies first
+  // (sync.ts), otherwise the next sync would simply download them all again.
+  async deleteAllConversations() {
+    for (const c of await listConversations()) await deleteConversation(c.id);
+    this.conversations = [];
+    this.current = null;
+    await setKv('lastConversationId', '');
+    this.emit();
+  }
+
   async appendMessage(m: Message) {
     if (!this.current) await this.newConversation();
     this.current!.messages.push(m);

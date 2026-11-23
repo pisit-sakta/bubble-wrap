@@ -37,6 +37,7 @@ export interface Settings {
   stream_openai: boolean;
   reasoning_effort: 'auto' | 'low' | 'medium' | 'high';
   show_thoughts: boolean;
+  show_decline_notices: boolean;   // explain on the message when the API declines a reply
   squash_system_messages: boolean;
   use_sysprompt: boolean;
   names_behavior: number;

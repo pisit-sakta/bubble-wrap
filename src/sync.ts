@@ -188,6 +188,17 @@ async function syncNow(): Promise<void> {
   }
 }
 
+// Remove every synced conversation from the backend (settings stay). Other devices see
+// them gone on their next sync and drop their copies too. No-op when sync is off.
+export async function deleteAllRemote(): Promise<void> {
+  if (!store.settings.sync_enabled) return;
+  if (!token) await authenticate();
+  for (const [key, rec] of await remoteMeta()) {
+    if (key !== 'settings') await api(`/api/collections/store/records/${rec.id}`, { method: 'DELETE' });
+  }
+  await setKv('syncedConvIds', []);
+}
+
 // Debounced, re-entrancy-safe runner. Local mutations call scheduleSync().
 function runSync(): void {
   if (!store.settings.sync_enabled) return;
