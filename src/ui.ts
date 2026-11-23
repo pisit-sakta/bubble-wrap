@@ -1,5 +1,5 @@
 import { store, newId } from './state';
-import { streamChat, fetchSettingsFromST, type StreamCallbacks } from './api';
+import { streamChat, fetchSettingsFromST, type StreamCallbacks, type StopInfo } from './api';
 import { fileToAttachment, repairLegacyImages, formatBytes } from './attach';
 import { renderMarkdown, renderMarkdownStreaming } from './markdown';
 import { CLAUDE_MODELS } from './defaults';
@@ -1025,6 +1025,24 @@ function enterEditMode(m: Message) {
   });
 }
 
+// A reply the API declined, cut short or paused comes back as a normal success, so say
+// what happened on the message itself — otherwise half a sentence (or nothing at all)
+// looks like the whole answer.
+function describeStop(stop: StopInfo, hasText: boolean): string {
+  if (stop.reason === 'length') return 'Cut off — this reply hit the response length limit (Max Response Tokens in Settings).';
+  if (stop.reason === 'paused') return 'The API paused this turn before it finished. Regenerate to try again.';
+  let s = `The API declined this reply${stop.category ? ` (safety check: ${stop.category})` : ''}.`;
+  if (hasText) s += ' The text above is incomplete.';
+  if (stop.explanation) s += ` ${stop.explanation}`;
+  // The one category with a known, fixable cause on the prompt side — and where trying
+  // again unchanged, or on another model, is documented not to help.
+  if (stop.category === 'reasoning_extraction') {
+    s += ' This usually means a prompt asks the model to write out its thinking — a thinking or scratchpad section, or numbered thinking steps. Take that part out (and turn on Thinking in Settings to see its reasoning instead); sending the same thing again will be declined again.';
+  }
+  if (stop.requestId) s += ` Request ${stop.requestId}.`;
+  return s;
+}
+
 // ─── Send / cancel ───
 async function onSendOrCancel() {
   if (store.streaming) {
@@ -1179,7 +1197,7 @@ async function streamAndAppend(reuseAssistantId?: string) {
         chip.textContent = query ? `🔍 Searching: ${query}` : '🔍 Searching the web…';
         scrollToBottomSoon();
       },
-      onDone: async ({ sources, queries }) => {
+      onDone: async ({ sources, queries, stop }) => {
         // Kill any pending streaming flush so it can't clobber the final render.
         if (raf != null) { cancelAnimationFrame(raf); raf = null; }
         dirty = false;
@@ -1196,6 +1214,7 @@ async function streamAndAppend(reuseAssistantId?: string) {
           store.current!.messages[i].thinking = accThinking || undefined;
           store.current!.messages[i].webSources = sources && sources.length ? sources : undefined;
           store.current!.messages[i].webSearchQueries = queries && queries.length ? queries : undefined;
+          if (stop) store.current!.messages[i].error = describeStop(stop, !!accText);
         }
         store.streaming = false;
         streamingMsgId = null;
