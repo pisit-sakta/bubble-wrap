@@ -1,5 +1,5 @@
 import type { Settings, Conversation, Message } from './types';
-import { DEFAULT_SETTINGS } from './defaults';
+import { DEFAULT_SETTINGS, RETIRED_GEMINI } from './defaults';
 import {
   loadSettings, saveSettings,
   listConversations, getConversation, saveConversation, deleteConversation,
@@ -29,6 +29,10 @@ class Store {
   async init() {
     const saved = await loadSettings();
     if (saved) this.settings = { ...DEFAULT_SETTINGS, ...saved };
+    // A stored choice of a since-retired model would be silently rerouted by Google to a
+    // different one; move it to the current default instead.
+    if (RETIRED_GEMINI.test(this.settings.gemini_model)) this.settings.gemini_model = DEFAULT_SETTINGS.gemini_model;
+    if (RETIRED_GEMINI.test(this.settings.openrouter_model)) this.settings.openrouter_model = DEFAULT_SETTINGS.openrouter_model;
     this.conversations = await listConversations();
     const lastId = (await getKv<string>('lastConversationId')) || undefined;
     if (lastId) {

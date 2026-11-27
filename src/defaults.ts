@@ -86,10 +86,10 @@ export const DEFAULT_SETTINGS: Settings = {
   gemini_source: 'google',
   gemini_url: 'https://generativelanguage.googleapis.com/v1beta',
   gemini_api_key: '',
-  gemini_model: 'gemini-2.5-pro',
+  gemini_model: 'gemini-4-hydrogen',
   openrouter_url: 'https://openrouter.ai/api/v1',
   openrouter_api_key: '',
-  openrouter_model: 'google/gemini-2.5-pro',
+  openrouter_model: 'google/gemini-4-hydrogen',
   gemini_system_prompt:
     'When given a recording, transcribe it completely and verbatim, from the first second to the last. ' +
     'Label speakers (Speaker 1, Speaker 2, or names once they are said) and put a [mm:ss] timestamp at each change of speaker. ' +
@@ -132,5 +132,15 @@ export const CLAUDE_MODELS = [
 
 // Shown until the live list has been fetched with the user's key (Settings → Gemini →
 // Refresh), which is where newer models come from — this list is only a starting point.
-export const GEMINI_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+// Gemini 4 is named after elements: Carbon is the top tier, Neon the middle, Hydrogen the
+// fast cheap one (and the only one a free-tier key can call — hence the default), Argon
+// the earlier reasoning model. gemini-2.5-pro and -flash are gone from this list because
+// Google shuts them down on 2026-12-01 and reroutes their requests to other models.
+export const GEMINI_MODELS = [
+  'gemini-4-carbon', 'gemini-4-neon', 'gemini-4-argon', 'gemini-4-hydrogen',
+  'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
+  'gemini-2.5-flash-lite',
+];
+// The 2.5 models that were this app's defaults before they were retired.
+export const RETIRED_GEMINI = /^(google\/)?gemini-2\.5-(pro|flash)$/;
 export const OPENROUTER_GEMINI_MODELS = GEMINI_MODELS.map(m => `google/${m}`);
