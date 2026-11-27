@@ -7,6 +7,7 @@ import { applyTheme, applyMode, type ThemePref } from './theme';
 import { streamGemini, geminiReady, activeGeminiModel, fetchGeminiModels, cachedGeminiModels, type GeminiCallbacks } from './gemini';
 import { onStatus, getStatus, syncNowManual, startSync, scheduleSync, deleteAllRemote, type SyncStatus } from './sync';
 import type { Attachment, Conversation, Message, Settings } from './types';
+import { getKv, setKv } from './db';
 
 // ─── Helpers ───
 const $ = <T extends Element>(s: string, root: ParentNode = document) => root.querySelector(s) as T | null;
@@ -125,6 +126,11 @@ export function mount(root: HTMLElement) {
         <button class="btn-secondary" id="btn-resync">Sync from ST</button>
       </div>
       <div class="sheet-body" id="sheet-body"></div>
+      <div class="save-bar hidden" id="save-bar">
+        <span class="lbl" id="save-bar-label">Unsaved changes</span>
+        <button class="btn-secondary" id="btn-discard">Discard</button>
+        <button class="btn-primary" id="btn-save">Save changes</button>
+      </div>
     </section>
   `;
 
@@ -151,8 +157,11 @@ export function mount(root: HTMLElement) {
   });
   $<HTMLButtonElement>('#btn-close-drawer')!.addEventListener('click', () => toggleDrawer(false));
   $<HTMLButtonElement>('#btn-settings')!.addEventListener('click', () => { renderSettingsSheet(); toggleSheet(true); });
-  $<HTMLButtonElement>('#btn-close-sheet')!.addEventListener('click', () => toggleSheet(false));
-  $<HTMLButtonElement>('#scrim')!.addEventListener('click', () => { toggleDrawer(false); toggleSheet(false); });
+  $<HTMLButtonElement>('#btn-close-sheet')!.addEventListener('click', closeSheet);
+  $<HTMLButtonElement>('#scrim')!.addEventListener('click', () => { toggleDrawer(false); closeSheet(); });
+  $<HTMLButtonElement>('#btn-save')!.addEventListener('click', saveDrafts);
+  $<HTMLButtonElement>('#btn-discard')!.addEventListener('click', () => { drafts.clear(); renderSettingsSheet(); toast('Changes discarded'); });
+  getKv<PromptHistory>('promptHistory').then(h => { if (h) promptHistory = h; }).catch(() => {});
   $<HTMLButtonElement>('#btn-new')!.addEventListener('click', async () => {
     await store.newConversation();
     toggleDrawer(false);
@@ -252,8 +261,7 @@ function geminiModelOptions(): string[] {
 }
 // The list comes from the service itself, so new models appear without an app update.
 // Cached copy first (instant, works offline); `live` asks the service again.
-async function loadGeminiModels(live: boolean): Promise<void> {
-  const s = store.settings;
+async function loadGeminiModels(live: boolean, s: Settings = store.settings): Promise<void> {
   geminiModels = await cachedGeminiModels(s);
   if (live && (s.gemini_source === 'openrouter' || s.gemini_api_key)) geminiModels = await fetchGeminiModels(s);
 }
@@ -1521,6 +1529,59 @@ function toggleSheet(open: boolean) {
   $('#scrim')!.classList.toggle('open', open);
 }
 
+// ─── Settings are edited as a draft ───
+// Nothing typed or picked in a Settings field is stored until "Save changes" is pressed.
+// Saving on every keystroke meant one slip (cut instead of copy on a long prompt)
+// was written to disk, and to sync, before it could be noticed.
+const drafts = new Map<keyof Settings, any>();
+// And for when the slip gets saved anyway: the previous text of each prompt is kept.
+type PromptHistory = Partial<Record<keyof Settings, { at: number; text: string }[]>>;
+let promptHistory: PromptHistory = {};
+const PROMPT_KEYS: (keyof Settings)[] = ['system_prompt', 'userstyle1', 'userstyle2', 'gemini_system_prompt'];
+const HISTORY_KEEP = 30;
+
+// Settings as they would be if the draft were saved — for actions inside the sheet
+// (Refresh models) that should use the key just pasted, saved or not.
+function draftSettings(): Settings {
+  return { ...store.settings, ...Object.fromEntries(drafts) } as Settings;
+}
+function updateSaveBar() {
+  $('#save-bar')?.classList.toggle('hidden', drafts.size === 0);
+  const lbl = $('#save-bar-label');
+  if (lbl) lbl.textContent = `${drafts.size} unsaved change${drafts.size === 1 ? '' : 's'}`;
+}
+async function saveDrafts() {
+  if (!drafts.size) return;
+  const patch = Object.fromEntries(drafts) as Partial<Settings>;
+  let kept = false;
+  for (const key of PROMPT_KEYS) {
+    const old = store.settings[key] as string;
+    if (!(key in patch) || !old?.trim() || old === patch[key]) continue;
+    promptHistory[key] = [{ at: Date.now(), text: old }, ...(promptHistory[key] || []).filter(v => v.text !== old)].slice(0, HISTORY_KEEP);
+    kept = true;
+  }
+  try {
+    if (kept) await setKv('promptHistory', promptHistory);
+    await store.updateSettings(patch);
+  } catch (e) {
+    toast(`Couldn't save: ${(e as Error).message || e}`, 'error');
+    return;
+  }
+  drafts.clear();
+  renderSettingsSheet();
+  toast('Saved ✓');
+  buzz();
+}
+function closeSheet() {
+  if (drafts.size && $('#sheet')!.classList.contains('open')) {
+    toast('Unsaved changes — Save or Discard first');
+    const bar = $('#save-bar')!;
+    bar.classList.remove('nudge'); void (bar as HTMLElement).offsetWidth; bar.classList.add('nudge');
+    return;
+  }
+  toggleSheet(false);
+}
+
 function field(label: string, desc: string | null, control: string) {
   return `<div class="field"><label>${escHtml(label)}</label>${desc ? `<div class="desc">${escHtml(desc)}</div>` : ''}${control}</div>`;
 }
@@ -1552,7 +1613,12 @@ function numberInput(key: string, value: number) {
   return `<input type="number" data-bind="${key}" value="${value}" />`;
 }
 function textAreaInput(key: string, value: string, rows = 4) {
-  return `<textarea data-bind="${key}" rows="${rows}">${escHtml(String(value ?? ''))}</textarea>`;
+  const versions = promptHistory[key as keyof Settings] || [];
+  const history = versions.length
+    ? `<select class="history" data-history="${key}"><option value="">↩ Earlier versions (${versions.length})…</option>${versions.map((v, i) =>
+        `<option value="${i}">${escHtml(new Date(v.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))} · ${v.text.length.toLocaleString()} chars · ${escHtml(v.text.slice(0, 40).replace(/\s+/g, ' '))}…</option>`).join('')}</select>`
+    : '';
+  return `<textarea data-bind="${key}" rows="${rows}">${escHtml(String(value ?? ''))}</textarea>${history}`;
 }
 
 function renderSettingsSheet() {
@@ -1750,12 +1816,28 @@ function renderSettingsSheet() {
     </div>
   `;
 
-  // Two-way bind
+  // Fields edit the draft (see `drafts`). A re-render mid-edit puts the draft back.
   body.querySelectorAll<HTMLElement>('[data-bind]').forEach(el => {
     const key = (el as any).dataset.bind as keyof Settings;
-    el.addEventListener('input', () => persistFromControl(el, key));
-    el.addEventListener('change', () => persistFromControl(el, key));
+    if (drafts.has(key)) (el as HTMLInputElement).value = String(drafts.get(key));
+    el.addEventListener('input', () => draftFromControl(el, key));
+    el.addEventListener('change', () => draftFromControl(el, key));
   });
+  // Picking an earlier version loads it into the box as a draft; Save makes it current
+  // (and files the text it replaces as a version in turn).
+  body.querySelectorAll<HTMLSelectElement>('[data-history]').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const key = sel.dataset.history as keyof Settings;
+      const v = promptHistory[key]?.[Number(sel.value)];
+      const ta = body.querySelector<HTMLTextAreaElement>(`textarea[data-bind="${key}"]`);
+      if (sel.value === '' || !v || !ta) return;
+      ta.value = v.text;
+      draftFromControl(ta, key);
+      sel.value = '';
+      toast('Earlier version loaded — Save changes to keep it');
+    });
+  });
+  updateSaveBar();
   body.querySelectorAll<HTMLDivElement>('[data-toggle]').forEach(el => {
     const key = el.dataset.toggle as keyof Settings;
     el.addEventListener('click', async () => {
@@ -1793,12 +1875,13 @@ function renderSettingsSheet() {
     if (!slot) return;
     slot.innerHTML = selectControl(geminiModelKey(), activeGeminiModel(store.settings), geminiModelOptions());
     const sel = slot.querySelector<HTMLSelectElement>('select')!;
-    sel.addEventListener('change', () => persistFromControl(sel, geminiModelKey()));
+    if (drafts.has(geminiModelKey())) sel.value = String(drafts.get(geminiModelKey()));
+    sel.addEventListener('change', () => draftFromControl(sel, geminiModelKey()));
   };
   $<HTMLButtonElement>('#set-gmodels')?.addEventListener('click', async () => {
     try {
-      await loadGeminiModels(true);
-      if (!geminiModels.length) { toast(store.settings.gemini_source === 'google' && !store.settings.gemini_api_key ? 'Paste your API key first' : 'The service returned no Gemini models', 'error'); return; }
+      await loadGeminiModels(true, draftSettings());
+      if (!geminiModels.length) { toast(store.settings.gemini_source === 'google' && !draftSettings().gemini_api_key ? 'Paste your API key first' : 'The service returned no Gemini models', 'error'); return; }
       fillModels();
       toast(`${geminiModels.length} models loaded ✓`);
     } catch (e) { toast((e as Error).message, 'error'); }
@@ -1869,7 +1952,7 @@ function renderSettingsSheet() {
   });
 }
 
-async function persistFromControl(el: HTMLElement, key: keyof Settings) {
+function draftFromControl(el: HTMLElement, key: keyof Settings) {
   const tagName = el.tagName;
   let val: any;
   if (tagName === 'INPUT') {
@@ -1886,7 +1969,9 @@ async function persistFromControl(el: HTMLElement, key: keyof Settings) {
     const v = $(`[data-val-for="${key}"]`);
     if (v) v.textContent = String(val);
   }
-  await store.updateSettings({ [key]: val } as any);
+  // Back to what is stored = no longer a change.
+  if (val === store.settings[key]) drafts.delete(key); else drafts.set(key, val);
+  updateSaveBar();
 }
 
 async function resyncFromST() {

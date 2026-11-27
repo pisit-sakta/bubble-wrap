@@ -945,3 +945,15 @@ details.adv .sub h4 {
 .model-toggle select { width: 100%; }
 .model-toggle select { padding: 8px 10px; font-family: var(--font-mono); font-size: 13px; color: var(--text); }
 :root[data-mode="gemini"] .chat-empty .logo { filter: none; color: #9b72cb; }
+
+/* ─── Settings: unsaved-changes bar ─── */
+.save-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-elev); border-top: 1px solid var(--border-strong);
+}
+.save-bar.hidden { display: none; }
+.save-bar .lbl { flex: 1; font-size: 13px; color: var(--text-dim); }
+.save-bar.nudge { animation: save-nudge 0.4s var(--ease); }
+@keyframes save-nudge { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+.field select.history { margin-top: 6px; font-size: 12px; color: var(--text-dim); }
