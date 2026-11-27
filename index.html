@@ -19,13 +19,14 @@
             ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
             : p;
           document.documentElement.setAttribute('data-theme', r);
+          if (localStorage.getItem('bubble-mode') === 'gemini') document.documentElement.setAttribute('data-mode', 'gemini');
         } catch (e) {
           document.documentElement.setAttribute('data-theme', 'dark');
         }
       })();
     </script>
-    <script type="module" crossorigin src="./assets/index-DPVgR3B-.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-DnU39mxd.css">
+    <script type="module" crossorigin src="./assets/index-DBbT5mN6.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Dk82v4RL.css">
   <link rel="manifest" href="./manifest.webmanifest"></head>
   <body>
     <div id="app"></div>
