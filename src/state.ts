@@ -74,7 +74,9 @@ class Store {
       id: cryptoRandom(),
       title: 'New chat',
       messages: [],
-      model: this.settings.claude_model,
+      model: this.settings.app_mode === 'gemini'
+        ? (this.settings.gemini_source === 'openrouter' ? this.settings.openrouter_model : this.settings.gemini_model)
+        : this.settings.claude_model,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };

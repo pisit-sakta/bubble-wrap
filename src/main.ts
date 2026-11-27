@@ -3,7 +3,7 @@ import 'highlight.js/styles/github-dark.css';
 import { registerSW } from 'virtual:pwa-register';
 import { store } from './state';
 import { mount } from './ui';
-import { applyTheme } from './theme';
+import { applyTheme, applyMode } from './theme';
 import { startSync } from './sync';
 
 // Register the service worker and AUTO-APPLY updates. Without this, the SW caches the
@@ -26,6 +26,7 @@ const root = document.getElementById('app')!;
 
 (async () => {
   await store.init();
+  applyMode(store.settings.app_mode);
   applyTheme(store.settings.theme ?? 'dark');
   mount(root);
   // Multi-device sync (no-op unless enabled in Settings). Never blocks the UI.

@@ -897,3 +897,51 @@ details.adv .sub h4 {
 .seg-control .seg:active { transform: scale(0.96); }
 .seg-control.wide { display: flex; width: 100%; margin-top: 6px; }
 .seg-control.wide .seg { flex: 1; text-align: center; padding: 7px 4px; }
+
+/* ─── Gemini mode (/gemini) — Google's palette: cool neutrals, blue accent, the
+       blue→violet→rose sparkle gradient on the bits that should feel alive ─── */
+:root { --spark: linear-gradient(120deg, #4285f4 0%, #9b72cb 55%, #d96570 100%); }
+:root[data-mode="gemini"] {
+  --bg: #131314;
+  --bg-elev: #1e1f20;
+  --bg-elev-2: #282a2c;
+  --bg-input: #1e1f20;
+  --bg-bubble-user: #282a2c;
+  --border: rgba(227, 232, 240, 0.09);
+  --border-strong: rgba(227, 232, 240, 0.16);
+  --text: #e3e3e3;
+  --text-dim: #a9adb4;
+  --text-faint: #72767d;
+  --accent: #4d8bf5;
+  --accent-hover: #3b78e7;
+  --danger: #f2736b;
+  --code-bg: #0e0e0f;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+:root[data-mode="gemini"][data-theme="light"] {
+  --bg: #ffffff;
+  --bg-elev: #f0f4f9;
+  --bg-elev-2: #e5eaf1;
+  --bg-input: #f0f4f9;
+  --bg-bubble-user: #e9eef6;
+  --border: rgba(31, 41, 55, 0.10);
+  --border-strong: rgba(31, 41, 55, 0.18);
+  --text: #1f1f1f;
+  --text-dim: #575b5f;
+  --text-faint: #8a8f96;
+  --accent: #0b57d0;
+  --accent-hover: #0842a0;
+  --danger: #b3261e;
+  --code-bg: #f0f4f9;
+  --shadow: 0 8px 28px rgba(31, 41, 55, 0.14);
+}
+:root[data-mode="gemini"] .topbar .title .name,
+:root[data-mode="gemini"] .chat-empty .title {
+  background: var(--spark); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+:root[data-mode="gemini"] .composer .send-btn.active,
+:root[data-mode="gemini"] .composer .send-btn.streaming { background: var(--spark); border-color: transparent; color: #fff; }
+:root[data-mode="gemini"] .claude-only { display: none; }
+.model-toggle select { width: 100%; }
+.model-toggle select { padding: 8px 10px; font-family: var(--font-mono); font-size: 13px; color: var(--text); }
+:root[data-mode="gemini"] .chat-empty .logo { filter: none; color: #9b72cb; }

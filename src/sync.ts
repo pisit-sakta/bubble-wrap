@@ -8,6 +8,7 @@ import { getKv, setKv, listConversations } from './db';
 // Settings that must stay device-local and never leave this machine.
 const LOCAL_KEYS: (keyof Settings)[] = [
   'proxy_password', 'st_basic_pass', 'sync_enabled', 'sync_url', 'sync_email', 'sync_password',
+  'gemini_api_key', 'openrouter_api_key', 'app_mode',
 ];
 
 let token = '';

@@ -84,6 +84,19 @@ export interface Settings {
   // ── Thinking ──
   thinking_effort: 'off' | 'low' | 'medium' | 'high' | 'max';
 
+  // ── Gemini mode (/gemini, /claude) ──
+  // Which engine the app is talking to. Gemini mode goes straight to Google (or
+  // OpenRouter) with its own key, model list and instructions — no proxy involved.
+  app_mode: 'claude' | 'gemini';
+  gemini_source: 'google' | 'openrouter';
+  gemini_url: string;             // https://generativelanguage.googleapis.com/v1beta
+  gemini_api_key: string;         // AIza…
+  gemini_model: string;
+  openrouter_url: string;         // https://openrouter.ai/api/v1
+  openrouter_api_key: string;     // sk-or-v1-…
+  openrouter_model: string;       // google/gemini-…
+  gemini_system_prompt: string;   // instructions used in Gemini mode instead of the Claude prompts
+
   // ── Sync (PocketBase) — device-local, never synced ──
   sync_enabled: boolean;
   sync_url: string;       // PocketBase base URL, e.g. https://bubble-pb.up.railway.app
@@ -93,7 +106,9 @@ export interface Settings {
 
 export interface Attachment {
   id: string;
-  kind: 'image' | 'pdf' | 'text';
+  // 'media' = audio or video. Its bytes are too big for the chat record, so they live in
+  // the `blobs` store under this attachment's id (this device only) — see media.ts.
+  kind: 'image' | 'pdf' | 'text' | 'media';
   name: string;
   mime: string;
   size: number;
@@ -108,6 +123,11 @@ export interface Attachment {
   // Images only. An image from an older build that no decoder here could open: kept in
   // the chat for the record, never put in a request.
   unreadable?: boolean;
+  // Media only. Where Google holds the uploaded copy (Files API). Uploads expire after
+  // 48 hours and belong to one API key, so both are remembered alongside the address.
+  fileUri?: string;
+  fileExpires?: number;
+  fileKeyTag?: string;
 }
 
 export interface WebSource {
