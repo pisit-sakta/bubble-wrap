@@ -1900,10 +1900,12 @@ function renderSettingsSheet() {
   };
   $<HTMLButtonElement>('#set-gmodels')?.addEventListener('click', async () => {
     try {
+      const before = new Set(geminiModelOptions());
       await loadGeminiModels(true, draftSettings());
+      const fresh = geminiModels.map(m => m.id).filter(id => !before.has(id));
       if (!geminiModels.length) { toast(store.settings.gemini_source === 'google' && !draftSettings().gemini_api_key ? 'Paste your API key first' : 'The service returned no Gemini models', 'error'); return; }
       fillModels();
-      toast(`${geminiModels.length} models loaded ✓`);
+      toast(`${geminiModels.length} models loaded ✓${fresh.length && fresh.length < geminiModels.length ? ` — new: ${fresh.slice(0, 3).join(', ')}${fresh.length > 3 ? '…' : ''}` : ''}`);
     } catch (e) { toast((e as Error).message, 'error'); }
   });
   // First open with a key but no list yet: fetch it quietly and fill the menu in.
