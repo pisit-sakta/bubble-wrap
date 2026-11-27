@@ -1,5 +1,5 @@
 import { store, newId } from './state';
-import { streamChat, fetchSettingsFromST, type StreamCallbacks, type StopInfo } from './api';
+import { streamChat, fetchSettingsFromST, fetchProxyModels, type StreamCallbacks, type StopInfo } from './api';
 import { fileToAttachment, repairLegacyImages, formatBytes } from './attach';
 import { renderMarkdown, renderMarkdownStreaming } from './markdown';
 import { CLAUDE_MODELS, GEMINI_MODELS, OPENROUTER_GEMINI_MODELS } from './defaults';
@@ -161,6 +161,7 @@ export function mount(root: HTMLElement) {
   $<HTMLButtonElement>('#scrim')!.addEventListener('click', () => { toggleDrawer(false); closeSheet(); });
   $<HTMLButtonElement>('#btn-save')!.addEventListener('click', saveDrafts);
   $<HTMLButtonElement>('#btn-discard')!.addEventListener('click', () => { drafts.clear(); renderSettingsSheet(); toast('Changes discarded'); });
+  getKv<string[]>('claudeModels').then(m => { if (m?.length) claudeModels = m; }).catch(() => {});
   getKv<PromptHistory>('promptHistory').then(h => { if (h) promptHistory = h; }).catch(() => {});
   $<HTMLButtonElement>('#btn-new')!.addEventListener('click', async () => {
     await store.newConversation();
@@ -248,6 +249,13 @@ function renderModelLabel() {
   el.textContent = `${m} · ${tok}`;
   const name = $<HTMLDivElement>('#app-name');
   if (name) name.textContent = gem ? 'Bubble ✦ Gemini' : 'Bubble';
+}
+
+// Claude models as last fetched from the proxy (Settings → Refresh); the built-in list
+// until then. Kept on the device so the menu is right at the next launch too.
+let claudeModels: string[] = [];
+function claudeModelOptions(): string[] {
+  return claudeModels.length ? claudeModels : CLAUDE_MODELS;
 }
 
 // ─── Claude ⇄ Gemini (/gemini, /claude, or Settings) ───
@@ -1689,9 +1697,9 @@ function renderSettingsSheet() {
         ${field('Chat Completion Source', null, selectControl('chat_completion_source', s.chat_completion_source, ['claude','openai','custom']))}
         ${field('Reverse Proxy URL', '/chat/completions appended automatically', textInput('reverse_proxy', s.reverse_proxy, 'url'))}
         ${field('Proxy Password', 'Sent as Bearer token', textInput('proxy_password', s.proxy_password, 'text', NO_MANGLE))}
-        ${field('Claude Model (primary)', null, selectControl('claude_model', s.claude_model, CLAUDE_MODELS))}
-        ${field('Claude Model (alt)', 'Quick-swap target in the topbar popover', selectControl('claude_alt_model', s.claude_alt_model, CLAUDE_MODELS))}
-        ${field('Compact Model', 'Used by /compact (long context recommended)', selectControl('compact_model', s.compact_model, CLAUDE_MODELS))}
+        ${field('Claude Model (primary)', claudeModels.length ? `${claudeModels.length} models, as listed by your proxy. Refresh to check for new ones.` : 'Built-in list. Refresh asks your proxy what it serves right now, newest first.', `<div style="display:flex;gap:8px;align-items:center"><div style="flex:1;min-width:0">${selectControl('claude_model', s.claude_model, claudeModelOptions())}</div><button class="btn-secondary" id="set-cmodels">Refresh</button></div>`)}
+        ${field('Claude Model (alt)', 'Quick-swap target in the topbar popover', selectControl('claude_alt_model', s.claude_alt_model, claudeModelOptions()))}
+        ${field('Compact Model', 'Used by /compact (long context recommended)', selectControl('compact_model', s.compact_model, claudeModelOptions()))}
         ${field('Custom Model', 'Used when source = custom', textInput('custom_model', s.custom_model))}
         ${field('Custom URL', 'Used when source = custom', textInput('custom_url', s.custom_url, 'url'))}
       </div>
@@ -1868,6 +1876,18 @@ function renderSettingsSheet() {
       buzz();
     });
   });
+  $<HTMLButtonElement>('#set-cmodels')?.addEventListener('click', async () => {
+    try {
+      const list = await fetchProxyModels(draftSettings());
+      if (!list.length) { toast('The proxy returned an empty model list — the built-in list stays', 'error'); return; }
+      const fresh = list.filter(m => !claudeModelOptions().includes(m));
+      claudeModels = list;
+      await setKv('claudeModels', list);
+      redraw();   // a tap, not a background event — and unsaved edits are put back by the render
+      toast(`${list.length} models loaded ✓${fresh.length && fresh.length < list.length ? ` — new: ${fresh.slice(0, 3).join(', ')}${fresh.length > 3 ? '…' : ''}` : ''}`);
+    } catch (e) { toast((e as Error).message, 'error'); }
+  });
+
   // Swaps in just the model menu. Never the whole sheet: a list that arrives while a key
   // is being typed or pasted must not rebuild the field under the cursor.
   const fillModels = () => {

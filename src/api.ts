@@ -521,3 +521,39 @@ export function fileToDataUrl(file: File): Promise<string> {
 export async function fileToText(file: File): Promise<string> {
   return await file.text();
 }
+
+// The models the proxy says it serves right now (GET {proxy}/models — the listing both
+// the OpenAI and Anthropic APIs define, which proxies pass along or answer themselves).
+// Newest first. Only the standard Authorization header, as everywhere else in this file.
+export async function fetchProxyModels(settings: Settings): Promise<string[]> {
+  const base = settings.reverse_proxy.trim().replace(/\/$/, '');
+  if (!base) throw new Error('Set the proxy URL first');
+  const resp = await fetch(`${base}/models?limit=1000`, { headers: { Authorization: `Bearer ${settings.proxy_password}` } });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(resp.status === 404
+      ? 'This proxy has no model list (/models returned 404) — the built-in list stays.'
+      : `Loading the model list failed (HTTP ${resp.status})${text ? `: ${text.slice(0, 200)}` : ''}`);
+  }
+  const json: any = await resp.json().catch(() => null);
+  const rows: any[] = Array.isArray(json) ? json : json?.data || json?.models || [];
+  const when = (r: any) => (typeof r?.created === 'number' ? r.created * 1000 : Date.parse(r?.created_at) || 0);
+  const all = rows
+    .map(r => ({ id: String(typeof r === 'string' ? r : r?.id || r?.name || '').replace(/^models\//, ''), at: when(r) }))
+    .filter(r => r.id);
+  // A proxy fronting several providers lists them all; this menu is for Claude. If
+  // nothing is named claude (a custom source), show everything rather than nothing.
+  const claude = all.filter(r => /claude/i.test(r.id));
+  const list = claude.length ? claude : all;
+  // By release date when the proxy gives one. Otherwise by the version in the name
+  // (claude-fable-5-2 → 5.2, claude-3-5-sonnet → 3.5; an 8-digit date stamp is not a
+  // version), then by tier, so the menu still reads newest and biggest first.
+  const version = (id: string) => {
+    const n = (id.match(/(?<![\d.])\d{1,2}(?![\d])/g) || []).slice(0, 2);
+    return n.length ? Number(n[0]) + Number(n[1] || 0) / 100 : 0;
+  };
+  const tier = (id: string) => ['haiku', 'sonnet', 'opus', 'fable', 'mythos'].findIndex(t => id.includes(t));
+  list.sort((a, b) => (b.at - a.at) || (version(b.id) - version(a.id)) || (tier(b.id) - tier(a.id))
+    || b.id.localeCompare(a.id, undefined, { numeric: true }));
+  return [...new Set(list.map(r => r.id))];
+}
