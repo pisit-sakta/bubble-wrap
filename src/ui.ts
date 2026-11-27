@@ -1543,6 +1543,8 @@ function selectControl(key: string, value: string, options: string[]) {
 function textInput(key: string, value: string, type = 'text', extraAttrs = '') {
   return `<input type="${type}" data-bind="${key}" value="${escHtml(String(value ?? ''))}" ${extraAttrs} />`;
 }
+// Passwords and keys are shown as plain text on purpose (owner's call: this is a
+// one-person app, and a masked key can't be checked for a bad paste).
 // Mobile keyboards autocapitalize/autocorrect by default — fatal for URLs, emails
 // and passwords. Stamp these off so the typed value is exactly what the user sees.
 const NO_MANGLE = 'autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"';
@@ -1585,9 +1587,9 @@ function renderSettingsSheet() {
         }</div>`)}
         ${orr
           ? field('OpenRouter API URL', 'Already filled in — leave it unless you know you need another.', textInput('openrouter_url', s.openrouter_url, 'url', NO_MANGLE + ' placeholder="https://openrouter.ai/api/v1"'))
-            + field('OpenRouter API key', 'From openrouter.ai → Keys. Stays on this device.', textInput('openrouter_api_key', s.openrouter_api_key, 'password', NO_MANGLE + ' placeholder="sk-or-v1-…"'))
+            + field('OpenRouter API key', 'From openrouter.ai → Keys. Stays on this device.', textInput('openrouter_api_key', s.openrouter_api_key, 'text', NO_MANGLE + ' placeholder="sk-or-v1-…"'))
           : field('Gemini API URL', 'Already filled in — leave it unless you know you need another.', textInput('gemini_url', s.gemini_url, 'url', NO_MANGLE + ' placeholder="https://generativelanguage.googleapis.com/v1beta"'))
-            + field('Gemini API key', 'From aistudio.google.com → Get API key. Stays on this device.', textInput('gemini_api_key', s.gemini_api_key, 'password', NO_MANGLE + ' placeholder="AIzaSy…"'))}
+            + field('Gemini API key', 'From aistudio.google.com → Get API key. Stays on this device.', textInput('gemini_api_key', s.gemini_api_key, 'text', NO_MANGLE + ' placeholder="AIzaSy…"'))}
         ${field('Model', 'Refresh pulls the current list from the service, newest first.', `<div style="display:flex;gap:8px;align-items:center"><div style="flex:1;min-width:0" id="gmodel-slot">${selectControl(geminiModelKey(), activeGeminiModel(s), geminiModelOptions())}</div><button class="btn-secondary" id="set-gmodels">Refresh</button></div>`)}
         ${field('Instructions', 'Sent with every Gemini request (your Claude prompts are not). Output length is not a setting here: every reply gets the model\'s full allowance and is continued automatically past it.', textAreaInput('gemini_system_prompt', s.gemini_system_prompt, 5))}
       </div>
@@ -1620,7 +1622,7 @@ function renderSettingsSheet() {
       <div class="group">
         ${field('Chat Completion Source', null, selectControl('chat_completion_source', s.chat_completion_source, ['claude','openai','custom']))}
         ${field('Reverse Proxy URL', '/chat/completions appended automatically', textInput('reverse_proxy', s.reverse_proxy, 'url'))}
-        ${field('Proxy Password', 'Sent as Bearer token', textInput('proxy_password', s.proxy_password, 'password'))}
+        ${field('Proxy Password', 'Sent as Bearer token', textInput('proxy_password', s.proxy_password, 'text', NO_MANGLE))}
         ${field('Claude Model (primary)', null, selectControl('claude_model', s.claude_model, CLAUDE_MODELS))}
         ${field('Claude Model (alt)', 'Quick-swap target in the topbar popover', selectControl('claude_alt_model', s.claude_alt_model, CLAUDE_MODELS))}
         ${field('Compact Model', 'Used by /compact (long context recommended)', selectControl('compact_model', s.compact_model, CLAUDE_MODELS))}
@@ -1648,7 +1650,7 @@ function renderSettingsSheet() {
       <div class="group">
         ${field('SillyTavern URL', null, textInput('st_url', s.st_url, 'url'))}
         ${field('Basic Auth User', null, textInput('st_basic_user', s.st_basic_user))}
-        ${field('Basic Auth Password', null, textInput('st_basic_pass', s.st_basic_pass, 'password'))}
+        ${field('Basic Auth Password', null, textInput('st_basic_pass', s.st_basic_pass, 'text', NO_MANGLE))}
       </div>
     </div>
 
@@ -1725,7 +1727,7 @@ function renderSettingsSheet() {
         ${rowField('Enable sync', 'Mirror chats & settings to your PocketBase (proxy password stays on this device)', toggleControl('sync_enabled', s.sync_enabled))}
         ${field('PocketBase URL', 'e.g. https://bubble-pb.up.railway.app', textInput('sync_url', s.sync_url, 'url', NO_MANGLE))}
         ${field('Account email', null, textInput('sync_email', s.sync_email, 'email', NO_MANGLE))}
-        ${field('Account password', 'Your PocketBase user login (device-local)', textInput('sync_password', s.sync_password, 'password', NO_MANGLE))}
+        ${field('Account password', 'Your PocketBase user login (device-local)', textInput('sync_password', s.sync_password, 'text', NO_MANGLE))}
         ${rowField('Status', null, '<button class="btn-secondary" id="set-sync-now">Connect &amp; sync now</button>')}
         <div class="field"><div class="desc" id="sync-status">—</div></div>
       </div>
