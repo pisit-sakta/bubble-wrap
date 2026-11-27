@@ -113,7 +113,9 @@ function planImages(history: Message[], budget: number): ImagePlan {
 function textBodyOf(m: Message, plan: ImagePlan, files: Attachment[]): string {
   const notes = (m.attachments || []).map(a => plan.note.get(a)).filter(Boolean).join('\n');
   const filesBlock = files
-    .map(a => `<attached_file name="${a.name}" type="${a.mime}">\n${a.text || ''}\n</attached_file>`)
+    .map(a => a.kind === 'media'
+      ? `[attached recording "${a.name}" is not included: audio and video are only sent in Gemini mode]`
+      : `<attached_file name="${a.name}" type="${a.mime}">\n${a.text || ''}\n</attached_file>`)
     .join('\n\n');
   return [notes, filesBlock, m.content || ''].filter(Boolean).join('\n\n');
 }

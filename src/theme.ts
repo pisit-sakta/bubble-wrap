@@ -14,13 +14,26 @@ export function resolveTheme(pref: ThemePref): 'light' | 'dark' {
   return pref;
 }
 
+// The browser/status-bar colour has to match the page background of the palette in use.
+function paintChrome(): void {
+  const { theme, mode } = document.documentElement.dataset;
+  const colors = mode === 'gemini' ? { light: '#ffffff', dark: '#131314' } : { light: '#faf9f5', dark: '#1a1a1a' };
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'light' ? colors.light : colors.dark);
+}
+
+// Claude or Gemini palette (style.css keys off <html data-mode>). Mirrored to
+// localStorage for the same reason as the theme: the boot script paints it first.
+export function applyMode(mode: 'claude' | 'gemini'): void {
+  document.documentElement.dataset.mode = mode;
+  try { localStorage.setItem('bubble-mode', mode); } catch { /* private mode */ }
+  paintChrome();
+}
+
 export function applyTheme(pref: ThemePref): void {
   const resolved = resolveTheme(pref);
   document.documentElement.dataset.theme = resolved;
   try { localStorage.setItem(STORAGE_KEY, pref); } catch { /* private mode */ }
-
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', resolved === 'light' ? '#faf9f5' : '#1a1a1a');
+  paintChrome();
 
   // When in 'auto', follow live OS theme changes.
   if (!systemMql) {

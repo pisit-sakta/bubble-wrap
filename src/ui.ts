@@ -2,8 +2,9 @@ import { store, newId } from './state';
 import { streamChat, fetchSettingsFromST, type StreamCallbacks, type StopInfo } from './api';
 import { fileToAttachment, repairLegacyImages, formatBytes } from './attach';
 import { renderMarkdown, renderMarkdownStreaming } from './markdown';
-import { CLAUDE_MODELS } from './defaults';
-import { applyTheme, type ThemePref } from './theme';
+import { CLAUDE_MODELS, GEMINI_MODELS, OPENROUTER_GEMINI_MODELS } from './defaults';
+import { applyTheme, applyMode, type ThemePref } from './theme';
+import { streamGemini, geminiReady, activeGeminiModel, fetchGeminiModels, cachedGeminiModels, type GeminiCallbacks } from './gemini';
 import { onStatus, getStatus, syncNowManual, startSync, scheduleSync, deleteAllRemote, type SyncStatus } from './sync';
 import type { Attachment, Conversation, Message, Settings } from './types';
 
@@ -19,7 +20,7 @@ let abortCtrl: AbortController | null = null;
 // Resolves once the reply in flight has completely finished — including the saving that
 // onDone/onError do after the network part ends, which streamChat itself doesn't wait for.
 let streamSettled: Promise<void> = Promise.resolve();
-function settling(cb: StreamCallbacks, settle: () => void): StreamCallbacks {
+function settling<T extends StreamCallbacks>(cb: T, settle: () => void): T {
   return {
     ...cb,
     onDone: async (full) => { try { await cb.onDone(full); } finally { settle(); } },
@@ -57,7 +58,7 @@ export function mount(root: HTMLElement) {
       <header class="topbar">
         <button class="icon-btn" id="btn-menu" aria-label="Conversations">☰</button>
         <button class="title" id="btn-model" aria-label="Model & compaction">
-          <div class="name">Bubble</div>
+          <div class="name" id="app-name">Bubble</div>
           <div class="model" id="model-label"></div>
         </button>
         <button class="icon-btn" id="btn-settings" aria-label="Settings">⚙</button>
@@ -65,14 +66,14 @@ export function mount(root: HTMLElement) {
 
       <div class="popover hidden" id="model-popover">
         <div class="popover-section">
-          <div class="popover-label">Active model — tap to swap</div>
+          <div class="popover-label" id="model-toggle-label">Active model — tap to swap</div>
           <div class="model-toggle" id="model-toggle"></div>
         </div>
         <div class="popover-section">
           <div class="popover-label">This conversation</div>
           <div class="token-row" id="token-row"></div>
         </div>
-        <div class="popover-section">
+        <div class="popover-section claude-only">
           <button class="popover-btn" id="btn-compact-now">📦 Compact conversation</button>
           <div class="popover-hint">Summarizes via <span id="compact-model-name"></span> and replaces history. You can also type <code>/compact</code>.</div>
         </div>
@@ -83,7 +84,7 @@ export function mount(root: HTMLElement) {
             <button class="popover-btn ghost" id="btn-export-json">⬇ JSON</button>
           </div>
         </div>
-        <div class="popover-section">
+        <div class="popover-section claude-only">
           <div class="popover-label">Web search</div>
           <button class="ws-row" id="btn-ws-toggle" type="button">
             <span class="ws-txt">🔍 Let Claude search the web</span>
@@ -100,7 +101,7 @@ export function mount(root: HTMLElement) {
         <div class="attachments" id="attachments"></div>
         <div class="row">
           <button class="icon-btn" id="btn-attach" aria-label="Attach">+</button>
-          <input type="file" id="file-input" multiple accept="image/*,.png,.jpg,.jpeg,.jfif,.webp,.gif,.bmp,.svg,.avif,.heic,.heif,.tif,.tiff,.ico,.pdf,.md,.markdown,.txt,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.c,.cpp,.h,.css,.html,.xml,.yaml,.yml,.toml,.sh,.log,text/*" hidden />
+          <input type="file" id="file-input" multiple accept="image/*,.png,.jpg,.jpeg,.jfif,.webp,.gif,.bmp,.svg,.avif,.heic,.heif,.tif,.tiff,.ico,.pdf,.md,.markdown,.txt,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.c,.cpp,.h,.css,.html,.xml,.yaml,.yml,.toml,.sh,.log,text/*,audio/*,video/*,.mp3,.m4a,.wav,.aac,.ogg,.opus,.flac,.aiff,.amr,.mp4,.mov,.webm,.mkv" hidden />
           <textarea id="composer-input" rows="1" placeholder="Message..." autocapitalize="sentences"></textarea>
           <button class="icon-btn send-btn" id="btn-send" aria-label="Send">↑</button>
         </div>
@@ -194,8 +195,8 @@ export function mount(root: HTMLElement) {
   updateSendBtn();
 
   // Welcome / bootstrap nudge
-  if (!store.settings.proxy_password) {
-    setTimeout(() => toast('Open Settings → fill in proxy URL & password', 'info'), 800);
+  if (store.settings.app_mode === 'gemini' ? !geminiReady(store.settings) : !store.settings.proxy_password) {
+    setTimeout(() => toast(store.settings.app_mode === 'gemini' ? 'Open Settings → Gemini → paste your API key' : 'Open Settings → fill in proxy URL & password', 'info'), 800);
   }
 }
 
@@ -232,9 +233,47 @@ function updateSendBtn() {
 function renderModelLabel() {
   const el = $<HTMLDivElement>('#model-label');
   if (!el) return;
-  const m = store.settings.claude_model;
+  const gem = store.settings.app_mode === 'gemini';
+  const m = gem ? activeGeminiModel(store.settings) : store.settings.claude_model;
   const tok = formatTokens(totalConversationTokens());
   el.textContent = `${m} · ${tok}`;
+  const name = $<HTMLDivElement>('#app-name');
+  if (name) name.textContent = gem ? 'Bubble ✦ Gemini' : 'Bubble';
+}
+
+// ─── Claude ⇄ Gemini (/gemini, /claude, or Settings) ───
+let geminiModels: { id: string; out?: number }[] = [];
+function geminiModelKey(): 'gemini_model' | 'openrouter_model' {
+  return store.settings.gemini_source === 'openrouter' ? 'openrouter_model' : 'gemini_model';
+}
+function geminiModelOptions(): string[] {
+  const fallback = store.settings.gemini_source === 'openrouter' ? OPENROUTER_GEMINI_MODELS : GEMINI_MODELS;
+  return geminiModels.length ? geminiModels.map(m => m.id) : fallback;
+}
+// The list comes from the service itself, so new models appear without an app update.
+// Cached copy first (instant, works offline); `live` asks the service again.
+async function loadGeminiModels(live: boolean): Promise<void> {
+  const s = store.settings;
+  geminiModels = await cachedGeminiModels(s);
+  if (live && (s.gemini_source === 'openrouter' || s.gemini_api_key)) geminiModels = await fetchGeminiModels(s);
+}
+
+async function setMode(mode: Settings['app_mode']) {
+  if (store.settings.app_mode === mode) { toast(mode === 'gemini' ? 'Already in Gemini mode ✦' : 'Already in Claude mode'); return; }
+  applyMode(mode);
+  await store.updateSettings({ app_mode: mode });
+  buzz(12);
+  if (mode === 'claude') { toast('Back to Claude 🫧'); return; }
+  await loadGeminiModels(false).catch(() => {});
+  if (geminiReady(store.settings)) {
+    toast('Gemini mode ✦ — attach a recording and go');
+    if (!geminiModels.length) loadGeminiModels(true).catch(() => {});
+  } else {
+    // First visit: nothing works without a key, so go straight to where it is entered.
+    toast('Gemini mode ✦ — paste your API key to start');
+    renderSettingsSheet();
+    toggleSheet(true);
+  }
 }
 
 // ─── Token counter (chars/4 heuristic) ───
@@ -265,6 +304,9 @@ function renderPromptChips() {
   const root = $<HTMLDivElement>('#prompt-chips');
   if (!root) return;
   const s = store.settings;
+  // The System / Style prompts are written for Claude. Gemini mode has its own
+  // instructions box in Settings and ignores these, so don't offer switches that do nothing.
+  if (s.app_mode === 'gemini') { root.innerHTML = ''; return; }
   const chips = [
     { key: 'system_prompt' as const, name: 'System', body: s.system_prompt, on: s.system_prompt_enabled, enabledKey: 'system_prompt_enabled' as const },
     { key: 'userstyle1' as const, name: s.userstyle1_name || 'Style 1', body: s.userstyle1, on: s.userstyle1_enabled, enabledKey: 'userstyle1_enabled' as const },
@@ -291,6 +333,10 @@ function effectiveSystemPrompt(): string {
   if (store.current?.compactionSummary) {
     parts.push(`<previous_conversation_summary>\n${store.current.compactionSummary}\n</previous_conversation_summary>`);
   }
+  if (s.app_mode === 'gemini') {
+    if (s.gemini_system_prompt?.trim()) parts.push(s.gemini_system_prompt.trim());
+    return parts.join('\n\n');
+  }
   if (s.system_prompt_enabled && s.system_prompt?.trim()) parts.push(s.system_prompt.trim());
   if (s.userstyle1_enabled && s.userstyle1?.trim()) parts.push(s.userstyle1.trim());
   if (s.userstyle2_enabled && s.userstyle2?.trim()) parts.push(s.userstyle2.trim());
@@ -313,7 +359,20 @@ function toggleModelPopover(force?: boolean) {
 function renderModelPopover() {
   const s = store.settings;
   const toggle = $<HTMLDivElement>('#model-toggle');
-  if (toggle) {
+  const gem = s.app_mode === 'gemini';
+  const label = $<HTMLDivElement>('#model-toggle-label');
+  if (label) label.textContent = gem ? `Gemini model · ${s.gemini_source === 'openrouter' ? 'OpenRouter' : 'Google'}` : 'Active model — tap to swap';
+  if (toggle && gem) {
+    const draw = () => {
+      toggle.innerHTML = selectControl(geminiModelKey(), activeGeminiModel(store.settings), geminiModelOptions());
+      toggle.querySelector('select')!.addEventListener('change', async (e) => {
+        await store.updateSettings({ [geminiModelKey()]: (e.target as HTMLSelectElement).value } as any);
+        buzz();
+      });
+    };
+    draw();
+    loadGeminiModels(!geminiModels.length).then(draw).catch(() => {});
+  } else if (toggle) {
     const a = s.claude_model;
     const b = s.claude_alt_model || s.claude_model;
     toggle.innerHTML = `
@@ -344,6 +403,7 @@ function renderModelPopover() {
 let compacting = false;
 async function runCompact() {
   if (compacting) return;
+  if (store.settings.app_mode === 'gemini') { toast('Compact runs on Claude — type /claude first'); return; }
   if (!store.current || !store.current.messages.length) {
     toast('Nothing to compact yet', 'info');
     return;
@@ -495,12 +555,13 @@ function ensureChatRoot(): HTMLDivElement | null {
 }
 
 function renderEmptyState(root: HTMLDivElement) {
+  const gem = store.settings.app_mode === 'gemini';
   root.innerHTML = `
     <div class="chat-empty">
       <div>
-        <div class="logo">🫧</div>
-        <div class="title">Start a conversation</div>
-        <div class="sub">Anything goes — code, debugging, prose, weird hypotheticals</div>
+        <div class="logo">${gem ? '✦' : '🫧'}</div>
+        <div class="title">${gem ? 'Gemini mode' : 'Start a conversation'}</div>
+        <div class="sub">${gem ? 'Attach a recording with + and get the whole transcript back, however long. /claude to go back.' : 'Anything goes — code, debugging, prose, weird hypotheticals'}</div>
       </div>
     </div>`;
   msgNodes.clear();
@@ -707,7 +768,9 @@ function updateStreamingBody(el: HTMLElement, m: Message, force = false) {
   // Throttle the (cheap, highlight-free) markdown re-parse to ~30fps for long
   // messages so we never thrash layout. Short messages render every frame.
   const now = performance.now();
-  if (!force && m.content.length > 400 && now - lastMdRender < 33) return;
+  // The interval stretches with the text: re-parsing a 300-page transcript 30 times a
+  // second would freeze a phone, and nobody reads the far end of it that fast anyway.
+  if (!force && m.content.length > 400 && now - lastMdRender < Math.min(1500, 33 + m.content.length / 150)) return;
   lastMdRender = now;
 
   body.innerHTML = renderMarkdownStreaming(m.content);
@@ -1029,6 +1092,15 @@ function enterEditMode(m: Message) {
 // what happened on the message itself — otherwise half a sentence (or nothing at all)
 // looks like the whole answer.
 function describeStop(stop: StopInfo, hasText: boolean): string {
+  if (store.settings.app_mode === 'gemini') {
+    if (stop.reason === 'length') {
+      return hasText
+        ? 'Stopped — this reply was extended as many times as Bubble allows. Send "continue" to keep going.'
+        : 'The model used its whole output allowance without writing anything (usually all spent on thinking). Regenerate, or pick another model.';
+    }
+    return `Gemini stopped this reply${stop.category ? ` (${stop.category})` : ''}.${hasText ? ' The text above is incomplete.' : ''}${
+      stop.category === 'RECITATION' ? ' That one means the output matched existing published text too closely; rewording the request usually gets past it.' : ''}`;
+  }
   if (stop.reason === 'length') return 'Cut off — this reply hit the response length limit (Max Response Tokens in Settings).';
   if (stop.reason === 'paused') return 'The API paused this turn before it finished. Regenerate to try again.';
   let s = `The API declined this reply${stop.category ? ` (safety check: ${stop.category})` : ''}.`;
@@ -1055,6 +1127,14 @@ async function onSendOrCancel() {
   if (!text && pendingAttachments.length === 0) return;
 
   // Slash commands
+  const cmd = text.toLowerCase();
+  if ((cmd === '/gemini' || cmd === '/claude') && pendingAttachments.length === 0) {
+    ta.value = '';
+    autoGrow(ta);
+    updateSendBtn();
+    await setMode(cmd === '/gemini' ? 'gemini' : 'claude');
+    return;
+  }
   if (text === '/compact' && pendingAttachments.length === 0) {
     ta.value = '';
     autoGrow(ta);
@@ -1098,7 +1178,12 @@ async function onSendOrCancel() {
 async function streamAndAppend(reuseAssistantId?: string) {
   if (!store.current) return;
   const s = store.settings;
-  if (!s.reverse_proxy || !s.proxy_password) {
+  const gem = s.app_mode === 'gemini';
+  if (gem && !geminiReady(s)) {
+    toast('Paste your API key in Settings → Gemini first', 'error');
+    return;
+  }
+  if (!gem && (!s.reverse_proxy || !s.proxy_password)) {
     toast('Set the proxy URL + password in Settings first', 'error');
     return;
   }
@@ -1176,25 +1261,32 @@ async function streamAndAppend(reuseAssistantId?: string) {
 
   let settle!: () => void;
   streamSettled = new Promise<void>(resolve => { settle = resolve; });
-  await streamChat(
+  // Progress that isn't reply text (uploading, searching, continuing) shows as a chip
+  // at the top of the bubble; the final render replaces the bubble and so removes it.
+  const statusChip = (text: string) => {
+    const bubble = msgNodes.get(asstId)?.querySelector('.bubble');
+    if (!bubble) return;
+    let chip = bubble.querySelector('.search-chip') as HTMLDivElement | null;
+    if (!text) { chip?.remove(); return; }
+    if (!chip) {
+      chip = document.createElement('div');
+      chip.className = 'search-chip';
+      bubble.prepend(chip);
+    }
+    chip.textContent = text;
+  };
+  const engine: (st: Settings, h: Message[], sp: string, cb: GeminiCallbacks, sig?: AbortSignal) => Promise<void> = gem ? streamGemini : streamChat;
+  await engine(
     s,
     historyForApi,
     systemPrompt,
-    settling({
+    settling<GeminiCallbacks>({
+      onStatus: statusChip,
       onText: (delta) => { accText += delta; requestFlush(); },
       onThinking: (delta) => { accThinking += delta; requestFlush(); },
       onNotice: (message) => toast(message),
       onSearch: (query) => {
-        const el = msgNodes.get(asstId);
-        const bubble = el?.querySelector('.bubble');
-        if (!bubble) return;
-        let chip = bubble.querySelector('.search-chip') as HTMLDivElement | null;
-        if (!chip) {
-          chip = document.createElement('div');
-          chip.className = 'search-chip';
-          bubble.prepend(chip);
-        }
-        chip.textContent = query ? `🔍 Searching: ${query}` : '🔍 Searching the web…';
+        statusChip(query ? `🔍 Searching: ${query}` : '🔍 Searching the web…');
         scrollToBottomSoon();
       },
       onDone: async ({ sources, queries, stop }) => {
@@ -1281,7 +1373,7 @@ async function onFilesPicked(e: Event) {
   const failed: string[] = [];
   for (const f of files) {   // one at a time — decoding several big photos at once can exhaust a phone
     try {
-      pendingAttachments.push(await fileToAttachment(f));
+      pendingAttachments.push(await fileToAttachment(f, { media: store.settings.app_mode === 'gemini' }));
     } catch (e) {
       failed.push(`${f.name || 'file'}: ${(e as Error).message || 'could not be read.'}`);
     }
@@ -1298,7 +1390,7 @@ function renderAttachments() {
     if (a.kind === 'image' && a.dataUrl) {
       return `<div class="att" data-id="${a.id}"><img src="${a.dataUrl}" alt=""><span class="x" data-x="${a.id}">✕</span></div>`;
     }
-    const icon = a.kind === 'pdf' ? '📕' : '📄';
+    const icon = a.kind === 'pdf' ? '📕' : a.kind === 'media' ? (a.mime.startsWith('video/') ? '🎬' : '🎧') : '📄';
     return `<div class="att" data-id="${a.id}">${icon}<span class="lbl">${escHtml(a.name)}</span><span class="x" data-x="${a.id}">✕</span></div>`;
   }).join('') + '<div class="att busy" aria-label="Preparing attachment"><span class="spin"></span></div>'.repeat(attachBusy);
   root.querySelectorAll<HTMLSpanElement>('[data-x]').forEach(el => {
@@ -1451,6 +1543,8 @@ function selectControl(key: string, value: string, options: string[]) {
 function textInput(key: string, value: string, type = 'text', extraAttrs = '') {
   return `<input type="${type}" data-bind="${key}" value="${escHtml(String(value ?? ''))}" ${extraAttrs} />`;
 }
+// Passwords and keys are shown as plain text on purpose (owner's call: this is a
+// one-person app, and a masked key can't be checked for a bad paste).
 // Mobile keyboards autocapitalize/autocorrect by default — fatal for URLs, emails
 // and passwords. Stamp these off so the typed value is exactly what the user sees.
 const NO_MANGLE = 'autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"';
@@ -1464,6 +1558,7 @@ function textAreaInput(key: string, value: string, rows = 4) {
 function renderSettingsSheet() {
   const body = $<HTMLDivElement>('#sheet-body')!;
   const s = store.settings;
+  const orr = s.gemini_source === 'openrouter';
   body.innerHTML = `
     <div class="sect">
       <h3>Mode</h3>
@@ -1474,6 +1569,29 @@ function renderSettingsSheet() {
           ).join('')
         }</div>`)}
         ${rowField('Explain declined replies', 'When the API declines a reply, say so (and why) under it. Off = the reply just stops.', toggleControl('show_decline_notices', s.show_decline_notices))}
+      </div>
+    </div>
+
+    <div class="sect">
+      <h3>Gemini ✦</h3>
+      <div class="group">
+        ${rowField('Engine', 'Same as typing /gemini or /claude in the chat box.', `<div class="seg-control" id="engine-control">${
+          ([['claude', 'Claude'], ['gemini', 'Gemini']] as const).map(([v, l]) =>
+            `<button class="seg ${s.app_mode === v ? 'on' : ''}" data-engine-pick="${v}">${l}</button>`
+          ).join('')
+        }</div>`)}
+        ${rowField('Source', orr ? 'OpenRouter: one key for everything, but recordings ride inside the request — fine up to ~40 MB.' : 'Google: your AI Studio key, straight to the Gemini API. Recordings up to 2 GB.', `<div class="seg-control" id="gsource-control">${
+          ([['google', 'Google'], ['openrouter', 'OpenRouter']] as const).map(([v, l]) =>
+            `<button class="seg ${s.gemini_source === v ? 'on' : ''}" data-gsource-pick="${v}">${l}</button>`
+          ).join('')
+        }</div>`)}
+        ${orr
+          ? field('OpenRouter API URL', 'Already filled in — leave it unless you know you need another.', textInput('openrouter_url', s.openrouter_url, 'url', NO_MANGLE + ' placeholder="https://openrouter.ai/api/v1"'))
+            + field('OpenRouter API key', 'From openrouter.ai → Keys. Stays on this device.', textInput('openrouter_api_key', s.openrouter_api_key, 'text', NO_MANGLE + ' placeholder="sk-or-v1-…"'))
+          : field('Gemini API URL', 'Already filled in — leave it unless you know you need another.', textInput('gemini_url', s.gemini_url, 'url', NO_MANGLE + ' placeholder="https://generativelanguage.googleapis.com/v1beta"'))
+            + field('Gemini API key', 'From aistudio.google.com → Get API key. Stays on this device.', textInput('gemini_api_key', s.gemini_api_key, 'text', NO_MANGLE + ' placeholder="AIzaSy…"'))}
+        ${field('Model', 'Refresh pulls the current list from the service, newest first.', `<div style="display:flex;gap:8px;align-items:center"><div style="flex:1;min-width:0" id="gmodel-slot">${selectControl(geminiModelKey(), activeGeminiModel(s), geminiModelOptions())}</div><button class="btn-secondary" id="set-gmodels">Refresh</button></div>`)}
+        ${field('Instructions', 'Sent with every Gemini request (your Claude prompts are not). Output length is not a setting here: every reply gets the model\'s full allowance and is continued automatically past it.', textAreaInput('gemini_system_prompt', s.gemini_system_prompt, 5))}
       </div>
     </div>
 
@@ -1504,7 +1622,7 @@ function renderSettingsSheet() {
       <div class="group">
         ${field('Chat Completion Source', null, selectControl('chat_completion_source', s.chat_completion_source, ['claude','openai','custom']))}
         ${field('Reverse Proxy URL', '/chat/completions appended automatically', textInput('reverse_proxy', s.reverse_proxy, 'url'))}
-        ${field('Proxy Password', 'Sent as Bearer token', textInput('proxy_password', s.proxy_password, 'password'))}
+        ${field('Proxy Password', 'Sent as Bearer token', textInput('proxy_password', s.proxy_password, 'text', NO_MANGLE))}
         ${field('Claude Model (primary)', null, selectControl('claude_model', s.claude_model, CLAUDE_MODELS))}
         ${field('Claude Model (alt)', 'Quick-swap target in the topbar popover', selectControl('claude_alt_model', s.claude_alt_model, CLAUDE_MODELS))}
         ${field('Compact Model', 'Used by /compact (long context recommended)', selectControl('compact_model', s.compact_model, CLAUDE_MODELS))}
@@ -1532,7 +1650,7 @@ function renderSettingsSheet() {
       <div class="group">
         ${field('SillyTavern URL', null, textInput('st_url', s.st_url, 'url'))}
         ${field('Basic Auth User', null, textInput('st_basic_user', s.st_basic_user))}
-        ${field('Basic Auth Password', null, textInput('st_basic_pass', s.st_basic_pass, 'password'))}
+        ${field('Basic Auth Password', null, textInput('st_basic_pass', s.st_basic_pass, 'text', NO_MANGLE))}
       </div>
     </div>
 
@@ -1609,7 +1727,7 @@ function renderSettingsSheet() {
         ${rowField('Enable sync', 'Mirror chats & settings to your PocketBase (proxy password stays on this device)', toggleControl('sync_enabled', s.sync_enabled))}
         ${field('PocketBase URL', 'e.g. https://bubble-pb.up.railway.app', textInput('sync_url', s.sync_url, 'url', NO_MANGLE))}
         ${field('Account email', null, textInput('sync_email', s.sync_email, 'email', NO_MANGLE))}
-        ${field('Account password', 'Your PocketBase user login (device-local)', textInput('sync_password', s.sync_password, 'password', NO_MANGLE))}
+        ${field('Account password', 'Your PocketBase user login (device-local)', textInput('sync_password', s.sync_password, 'text', NO_MANGLE))}
         ${rowField('Status', null, '<button class="btn-secondary" id="set-sync-now">Connect &amp; sync now</button>')}
         <div class="field"><div class="desc" id="sync-status">—</div></div>
       </div>
@@ -1647,6 +1765,46 @@ function renderSettingsSheet() {
       buzz();
     });
   });
+
+  // Gemini: engine, source, model list
+  const redraw = () => { const top = body.scrollTop; renderSettingsSheet(); body.scrollTop = top; };
+  body.querySelectorAll<HTMLButtonElement>('[data-engine-pick]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const pick = btn.dataset.enginePick as Settings['app_mode'];
+      if (pick === store.settings.app_mode) return;
+      applyMode(pick);
+      await store.updateSettings({ app_mode: pick });
+      redraw();
+      buzz();
+    });
+  });
+  body.querySelectorAll<HTMLButtonElement>('[data-gsource-pick]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await store.updateSettings({ gemini_source: btn.dataset.gsourcePick as Settings['gemini_source'] });
+      await loadGeminiModels(false).catch(() => {});
+      redraw();
+      buzz();
+    });
+  });
+  // Swaps in just the model menu. Never the whole sheet: a list that arrives while a key
+  // is being typed or pasted must not rebuild the field under the cursor.
+  const fillModels = () => {
+    const slot = $<HTMLDivElement>('#gmodel-slot');
+    if (!slot) return;
+    slot.innerHTML = selectControl(geminiModelKey(), activeGeminiModel(store.settings), geminiModelOptions());
+    const sel = slot.querySelector<HTMLSelectElement>('select')!;
+    sel.addEventListener('change', () => persistFromControl(sel, geminiModelKey()));
+  };
+  $<HTMLButtonElement>('#set-gmodels')?.addEventListener('click', async () => {
+    try {
+      await loadGeminiModels(true);
+      if (!geminiModels.length) { toast(store.settings.gemini_source === 'google' && !store.settings.gemini_api_key ? 'Paste your API key first' : 'The service returned no Gemini models', 'error'); return; }
+      fillModels();
+      toast(`${geminiModels.length} models loaded ✓`);
+    } catch (e) { toast((e as Error).message, 'error'); }
+  });
+  // First open with a key but no list yet: fetch it quietly and fill the menu in.
+  if (!geminiModels.length) loadGeminiModels(true).then(fillModels).catch(() => {});
 
   // Theme segmented control
   body.querySelectorAll<HTMLButtonElement>('[data-theme-pick]').forEach(btn => {

@@ -1,5 +1,6 @@
 import type { Attachment, Message } from './types';
 import { fileToDataUrl, fileToText } from './api';
+import { putBlob } from './db';
 import { normalizeImage, sniffImageType, looksLikePdf, looksLikeSvg, splitDataUrl, base64ToBlob } from './image';
 
 let pdfjsModule: any = null;
@@ -21,7 +22,7 @@ async function getPdfjs() {
   return lib;
 }
 
-export async function fileToAttachment(file: File): Promise<Attachment> {
+export async function fileToAttachment(file: File, opts: { media?: boolean } = {}): Promise<Attachment> {
   const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
   // What the picker claims the file is. That is frequently empty, or the meaningless
   // application/octet-stream (Android, share sheets), so fall back to the extension —
@@ -29,6 +30,15 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
   const claimed = file.type && file.type !== 'application/octet-stream' ? file.type : guessMime(file.name);
   const head = new Uint8Array(await file.slice(0, 4096).arrayBuffer());
   const base = { id, name: file.name, mime: claimed, size: file.size };
+
+  // Recordings. Never read into memory here: the file goes to disk as-is and is uploaded
+  // at send time (gemini.ts). `.ts` is TypeScript far more often than an MPEG stream.
+  if (/^(audio|video)\//.test(claimed) && !/\.(ts|tsx)$/i.test(file.name)) {
+    if (!opts.media) throw new Error('audio and video only work in Gemini mode — type /gemini to switch.');
+    if (!file.size) throw new Error('the file is empty.');
+    await putBlob(id, file);
+    return { ...base, mime: MEDIA_MIME[claimed] || claimed, kind: 'media' };
+  }
 
   const isSvg = claimed === 'image/svg+xml' || (claimed === 'application/octet-stream' && looksLikeSvg(head));
   const isPdf = looksLikePdf(head);
@@ -109,6 +119,13 @@ function retagDataUrl(dataUrl: string, mime: string): string {
   return `data:${mime};base64,${dataUrl.slice(comma + 1)}`;
 }
 
+// Labels browsers and phones use → the ones Gemini lists.
+const MEDIA_MIME: Record<string, string> = {
+  'audio/x-m4a': 'audio/mp4', 'audio/m4a': 'audio/mp4', 'audio/x-wav': 'audio/wav', 'audio/wave': 'audio/wav',
+  'audio/vnd.wave': 'audio/wav', 'audio/mp3': 'audio/mpeg', 'audio/x-aac': 'audio/aac', 'audio/x-flac': 'audio/flac',
+  'audio/x-aiff': 'audio/aiff', 'video/x-m4v': 'video/mp4',
+};
+
 function guessMime(name: string): string {
   const ext = name.split('.').pop()?.toLowerCase() || '';
   const map: Record<string, string> = {
@@ -136,6 +153,11 @@ function guessMime(name: string): string {
     ico: 'image/x-icon',
     heic: 'image/heic',
     heif: 'image/heif',
+    // Recordings (Gemini mode)
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg',
+    opus: 'audio/ogg', flac: 'audio/flac', aif: 'audio/aiff', aiff: 'audio/aiff', weba: 'audio/webm', amr: 'audio/amr',
+    mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska',
+    mpg: 'video/mpeg', mpeg: 'video/mpeg', avi: 'video/x-msvideo', '3gp': 'video/3gpp', wmv: 'video/x-ms-wmv',
   };
   return map[ext] || 'application/octet-stream';
 }

@@ -81,6 +81,20 @@ export const DEFAULT_SETTINGS: Settings = {
   // Thinking
   thinking_effort: 'off',
 
+  // Gemini mode
+  app_mode: 'claude',
+  gemini_source: 'google',
+  gemini_url: 'https://generativelanguage.googleapis.com/v1beta',
+  gemini_api_key: '',
+  gemini_model: 'gemini-2.5-pro',
+  openrouter_url: 'https://openrouter.ai/api/v1',
+  openrouter_api_key: '',
+  openrouter_model: 'google/gemini-2.5-pro',
+  gemini_system_prompt:
+    'When given a recording, transcribe it completely and verbatim, from the first second to the last. ' +
+    'Label speakers (Speaker 1, Speaker 2, or names once they are said) and put a [mm:ss] timestamp at each change of speaker. ' +
+    'Never summarize, skip, condense or stop early, however long the recording is — the full transcript is the deliverable.',
+
   // Sync (device-local)
   sync_enabled: false,
   sync_url: '',
@@ -115,3 +129,8 @@ export const CLAUDE_MODELS = [
   'claude-3-sonnet',
   'claude-3-haiku',
 ];
+
+// Shown until the live list has been fetched with the user's key (Settings → Gemini →
+// Refresh), which is where newer models come from — this list is only a starting point.
+export const GEMINI_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+export const OPENROUTER_GEMINI_MODELS = GEMINI_MODELS.map(m => `google/${m}`);

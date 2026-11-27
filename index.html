@@ -19,6 +19,7 @@
             ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
             : p;
           document.documentElement.setAttribute('data-theme', r);
+          if (localStorage.getItem('bubble-mode') === 'gemini') document.documentElement.setAttribute('data-mode', 'gemini');
         } catch (e) {
           document.documentElement.setAttribute('data-theme', 'dark');
         }

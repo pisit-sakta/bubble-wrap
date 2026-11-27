@@ -1,8 +1,8 @@
 import { openDB, type IDBPDatabase } from 'idb';
-import type { Conversation, Settings } from './types';
+import type { Conversation, Message, Settings } from './types';
 
 const DB_NAME = 'bubble';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBPDatabase> | null = null;
 
@@ -16,6 +16,11 @@ function getDb() {
         }
         if (!db.objectStoreNames.contains('kv')) {
           db.createObjectStore('kv');
+        }
+        // Audio/video attachments, keyed by attachment id. Kept out of the conversation
+        // record so a 60 MB recording isn't rewritten on every save or pushed to sync.
+        if (!db.objectStoreNames.contains('blobs')) {
+          db.createObjectStore('blobs');
         }
       },
     });
@@ -41,7 +46,27 @@ export async function saveConversation(c: Conversation): Promise<void> {
 
 export async function deleteConversation(id: string): Promise<void> {
   const db = await getDb();
+  // Its recordings go with it — nothing else points at them.
+  const c: Conversation | undefined = await db.get('conversations', id);
+  const walk = (msgs: Message[] = []): string[] => msgs.flatMap(m => [
+    ...(m.attachments || []).filter(a => a.kind === 'media').map(a => a.id),
+    ...(m.variants || []).flatMap(v => [
+      ...(v.attachments || []).filter(a => a.kind === 'media').map(a => a.id),
+      ...walk(v.downstreamSnapshot),
+    ]),
+  ]);
+  for (const blobId of new Set(walk(c?.messages))) await db.delete('blobs', blobId);
   await db.delete('conversations', id);
+}
+
+export async function putBlob(id: string, blob: Blob): Promise<void> {
+  const db = await getDb();
+  await db.put('blobs', blob, id);
+}
+
+export async function getBlob(id: string): Promise<Blob | undefined> {
+  const db = await getDb();
+  return db.get('blobs', id);
 }
 
 export async function loadSettings(): Promise<Settings | undefined> {
